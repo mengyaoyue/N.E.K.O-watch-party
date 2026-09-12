@@ -1,0 +1,131 @@
+"""陪看猫娘：纯标准库独立测试（python tests/test_basic.py，不联网）"""
+
+import importlib.util
+import json
+import sys
+import zlib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_logic():
+    spec = importlib.util.spec_from_file_location("neko_watch_logic", ROOT / "_watch_logic.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["neko_watch_logic"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def assert_eq(actual, expected, msg=""):
+    if actual != expected:
+        raise AssertionError(f"{msg}: expected {expected!r}, got {actual!r}")
+
+
+def make_danmaku_xml(items) -> bytes:
+    """构造压缩弹幕 XML（items: [(秒, 文本)]）。"""
+    rows = "".join(
+        f'<d p="{t},1,25,16777215,0,0,0,0">{text}</d>' for t, text in items
+    )
+    xml = f'<?xml version="1.0"?><i><chatserver>cs</chatserver>{rows}</i>'
+    return zlib.compress(xml.encode("utf-8"))
+
+
+def main():
+    print("加载 _watch_logic ...")
+    mod = load_logic()
+
+    # 1. 视频标识解析
+    cases = [
+        ("https://www.bilibili.com/video/BV1xx411c7mD?spm_id_from=x", {"bvid": "BV1xx411c7mD", "page": 1}),
+        ("https://www.bilibili.com/video/BV1xx411c7mD?p=3", {"bvid": "BV1xx411c7mD", "page": 3}),
+        ("BV1xx411c7mD", {"bvid": "BV1xx411c7mD", "page": 1}),
+        ("快看这个 av170001", {"aid": 170001, "page": 1}),
+        ("https://b23.tv/BV1xx411c7mD", {"bvid": "BV1xx411c7mD", "page": 1}),
+    ]
+    for text, expected in cases:
+        assert_eq(mod.parse_video_id(text), expected, f"解析 {text[:40]!r}")
+    assert mod.parse_video_id("随便说点什么") is None, "无视频标识应返回 None"
+    assert mod.parse_video_id("") is None, "空文本应返回 None"
+
+    # 2. 弹幕 XML 解压与解析（含时间排序、非法行跳过）
+    raw = make_danmaku_xml([(30.5, "哈哈哈"), (5.0, "前方高能"), ("abc", "坏行"), (120, "名场面"), (30.5, " duplicate")])
+    items = mod.parse_danmaku_xml(raw)
+    assert_eq([d["t"] for d in items], [5.0, 30.5, 30.5, 120.0], "应按时间排序")
+    assert_eq(items[0]["text"], "前方高能", "文本应正确")
+    # 未压缩的 XML 也能吃
+    plain = mod.decompress_danmaku(b"<i><d p=\"1,1,1,1,1,1,1,1\">hi</d></i>")
+    assert_eq(mod.parse_danmaku_xml(plain), [{"t": 1.0, "text": "hi"}], "未压缩 XML 应可直接解析")
+    assert mod.parse_danmaku_xml(b"\x00\x01garbage") == [], "垃圾数据应返回空"
+
+    # 3. 采样：超量时保留高能桶且按时间输出（2000 条散布在 2000 秒 → 200 个 10 秒桶）
+    many = [{"t": float(i), "text": f"danmaku_{i}"} for i in range(2000)]
+    sampled = mod.sample_danmaku(many, max_count=50)
+    assert len(sampled) == 50, f"采样应截到 50 条: {len(sampled)}"
+    assert all(sampled[i]["t"] <= sampled[i + 1]["t"] for i in range(len(sampled) - 1)), "采样后应按时间排序"
+    assert mod.sample_danmaku(many[:10]) == many[:10], "少量弹幕应全量返回"
+
+    # 4. 高能时刻：窗口密度 top3，且互不重叠
+    burst = [{"t": 100.0 + (i % 40) * 0.1, "text": "x"} for i in range(200)]
+    quiet = [{"t": float(i * 60), "text": "y"} for i in range(10)]
+    moments = mod.top_moments(burst + quiet, top=3)
+    assert len(moments) == 3, f"应有 3 个高能时刻: {moments}"
+    biggest = max(moments, key=lambda m: m["count"])
+    assert biggest["count"] >= 100, f"最高密度应来自爆发区: {moments}"
+    assert 95 <= biggest["at"] <= 145, f"爆发区应落在 100 秒附近: {moments}"
+    assert [m["at"] for m in moments] == sorted(m["at"] for m in moments), "输出应按时间排序"
+    for a, b in zip(moments, moments[1:]):
+        assert abs(a["at"] - b["at"]) >= 30, f"高能窗口应互不重叠: {moments}"
+
+    # 5. 提示词：包含视频信息与情绪枚举
+    prompt = mod.build_script_prompt("测试视频", "简介", "某UP", 300, [{"t": 12, "text": "梗"}], ["神评论"], 8)
+    assert "测试视频" in prompt and "300 秒" in prompt and "12秒" in prompt, "提示词应包含视频与弹幕"
+    assert "笑/感动/同情/震惊/吐槽/好奇/心疼/燃" in prompt, "应列出情绪枚举"
+    assert '"reactions"' in prompt, "应给出 JSON 模板"
+
+    # 6. 反应脚本提取与清洗
+    reactions_raw = [
+        {"at": 10, "emotion": "笑", "text": "开头就笑场了喵", "quote": "23333"},
+        {"at": 20, "emotion": "开心", "text": "同义词应被容错"},
+        {"at": 22, "emotion": "震惊", "text": "间隔太密应被丢弃"},
+        {"at": 999, "emotion": "燃", "text": "越界应被钳制"},
+        {"at": 60, "emotion": "感动", "text": "x" * 100},
+        {"at": "bad", "emotion": "笑", "text": "非法 at 应丢弃"},
+        {"at": 150, "emotion": "同情", "text": "结尾这条保留"},
+    ]
+    raw_model = "好的，这是脚本：\n```json\n" + json.dumps({"reactions": reactions_raw}, ensure_ascii=False) + "\n```\n以上喵。"
+    reactions = mod.normalize_reactions(raw_model, duration=300, reaction_count=10)
+    ats = [r["at"] for r in reactions]
+    assert_eq(ats[0], 10, "第一条应是 10 秒")
+    assert 20 not in ats, "同义 emotion 应被容错保留（'开心'→笑）"
+    assert 22 not in ats, "间隔 15 秒内的应被丢弃"
+    assert 10 in ats and 60 in ats and 150 in ats, f"合法条目应保留: {ats}"
+    assert all(r["at"] <= 297 for r in reactions), "越界时间应被钳制"
+    assert all(r["emotion"] in mod.EMOTIONS for r in reactions), "情绪应全部合法"
+    assert all(len(r["text"]) <= 61 for r in reactions), "文本应被截断到上限"
+    diffs = [b - a for a, b in zip(ats, ats[1:])]
+    assert all(d >= mod.MIN_GAP_SECONDS for d in diffs), f"相邻间隔应 ≥ {mod.MIN_GAP_SECONDS}: {diffs}"
+    assert mod.normalize_reactions("完全不是JSON", 300, 10) == [], "无法解析应返回空"
+
+    # 7. 渲染：开场白 / 反应 / 总结
+    video = {"title": "测试视频", "up": "某UP", "duration": 185, "view": 12345}
+    intro = mod.format_video_intro(video, 1200, 5, "猫娘")
+    assert "测试视频" in intro and "某UP" in intro and "1,200" in intro, f"开场白: {intro!r}"
+    minutes, seconds = divmod(185, 60)
+    assert f"{minutes}分{seconds:02d}秒" in intro, "时长应格式化"
+
+    reaction_text = mod.format_reaction({"emotion": "笑", "text": "太好笑了喵", "at": 95}, 95)
+    assert "😂" in reaction_text and "[01:35]" in reaction_text and "太好笑了喵" in reaction_text, f"反应渲染: {reaction_text!r}"
+
+    danmaku = [{"t": float(i), "text": "x"} for i in range(50)] + [{"t": 100.0 + i * 0.1, "text": "boom"} for i in range(80)]
+    fired = [{"at": 20, "emotion": "笑", "text": "a"}, {"at": 100, "emotion": "震惊", "text": "b"}]
+    summary = mod.build_summary(video, danmaku, fired, ["第一条热评"])
+    assert "陪看总结" in summary and "高能时刻" in summary and "情绪分布" in summary, f"总结: {summary!r}"
+    assert "笑×1" in summary and "震惊×1" in summary, "情绪统计应出现"
+    assert "第一条热评" in summary, "热评速览应出现"
+
+    print("全部测试通过 ✅")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,41 @@
+[plugin]
+name = "陪看猫娘"
+description = "陪主人看B站视频喵：发链接或BV号，猫娘预习视频、读取全量弹幕和热评，按播放进度在对应时间点冒出来表达笑/感动/同情/震惊/吐槽等情绪，还能随时解读「刚才那段什么梗」，看完自动输出高能时刻与情绪总结。数据匿名读取公开接口，零第三方依赖，评论接口失败自动降级。"
+short_description = "Catgirl watches Bilibili videos with you: reads danmaku, reacts with emotions on timeline."
+keywords = ["陪看", "watch", "bilibili", "B站", "弹幕", "danmaku", "共情", "猫娘", "neko", "视频", "video"]
+version = "0.1.0"
+type = "plugin"
+id = "neko_watch_party"
+entry = "plugin.plugins.neko_watch_party:WatchPartyPlugin"
+
+[plugin.author]
+name = "MENGYAOYUE"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.i18n]
+default_locale = "zh-CN"
+locales_dir = "i18n"
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+[plugin.store]
+enabled = true
+
+[neko_watch_party]
+# 全片生成的反应条数（3-20）
+reaction_count = 10
+# B站接口请求超时（秒）
+request_timeout = 15
+# 预习调用大模型超时（秒）
+llm_timeout = 45
+# 时间轴轮询间隔（秒）
+poll_interval = 2
+# 播完自动推送总结
+auto_summary = true
+catgirl_name = "猫娘"
+master_name = "主人"

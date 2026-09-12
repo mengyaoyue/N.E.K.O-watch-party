@@ -1,0 +1,14 @@
+# 陪看猫娘（neko_watch_party）配置示例
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+[neko_watch_party]
+reaction_count = 10
+request_timeout = 15
+llm_timeout = 45
+poll_interval = 2
+auto_summary = true
+catgirl_name = "猫娘"
+master_name = "主人"
