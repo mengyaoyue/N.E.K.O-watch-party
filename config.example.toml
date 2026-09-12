@@ -6,6 +6,8 @@ auto_start = false
 
 [neko_watch_party]
 reaction_count = 10
+# 反应密度：每分钟几条（1-10，面板里可改，下次预习生效）
+reactions_per_minute = 3
 # 预习完成后自动开始同步陪看（true=一步式；false=等用户说"开始看"）
 auto_begin = true
 # 陪看心跳：每 N 分钟轻推一句进度（0=关闭）

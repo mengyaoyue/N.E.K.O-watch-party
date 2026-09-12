@@ -27,16 +27,20 @@ EMOTIONS: dict[str, str] = {
 # 两条反应之间的最小间隔（秒）：不做话痨猫
 MIN_GAP_SECONDS = 15.0
 
-# 反应密度：默认每 45 秒一个反应点（长视频自动加密）
-SECONDS_PER_REACTION = 45
-MAX_REACTIONS = 60
+# 反应密度：由用户按"每分钟条数"控制（面板可调）
+MAX_REACTIONS = 150
+DEFAULT_RPM = 3
 
 
-def effective_reaction_count(duration: int, configured: int) -> int:
-    """按视频时长算应有的反应数：至少 configured 条，每 45 秒一个，上限 60。"""
-    duration = max(0, int(duration))
-    by_density = duration // SECONDS_PER_REACTION
-    return max(int(configured), min(MAX_REACTIONS, by_density))
+def count_for_duration(duration: int, rpm: float, floor: int = 10) -> int:
+    """按时长与每分钟条数算反应总数：时长(分) × rpm，下限 floor，上限 MAX_REACTIONS。"""
+    minutes = max(0, int(duration)) / 60.0
+    return max(int(floor), min(MAX_REACTIONS, int(round(minutes * max(0.5, float(rpm))))))
+
+
+def gap_for_rpm(rpm: float) -> float:
+    """由每分钟条数推导相邻反应最小间隔（秒），最低 6 秒。"""
+    return max(6.0, 55.0 / max(0.5, float(rpm)))
 
 
 # 碎碎念模板（结合上下文使用）
@@ -186,6 +190,7 @@ def build_script_prompt(
     sampled_danmaku: list[dict[str, Any]],
     comments: list[str],
     reaction_count: int,
+    min_gap: float = MIN_GAP_SECONDS,
 ) -> str:
     """构造"陪看脚本"生成提示词（一次 LLM 调用产出全片反应点）。"""
     danmaku_lines = "\n".join(f"{int(item['t'])}秒: {item['text']}" for item in sampled_danmaku)
@@ -211,7 +216,7 @@ UP主：{up_name}
 
 要求：
 - 共 {reaction_count} 条左右，均匀分布在整个 {duration} 秒里；弹幕密集的高能段可以密一点
-- at 是整数秒，范围 [5, {duration - 3}]，相邻两条至少间隔 {int(MIN_GAP_SECONDS)} 秒
+- at 是整数秒，范围 [5, {duration - 3}]，相邻两条至少间隔 {int(min_gap)} 秒
 - emotion 只能取：{emotion_list}
 - text 是猫娘口吻的一句话（不超过 {_MAX_TEXT_CHARS} 字，句尾可带"喵"），要针对视频内容本身，不要泛泛而谈
 - quote 可选，写触发你反应的那条弹幕/评论原文
@@ -265,6 +270,7 @@ def normalize_reactions(
     raw: Any,
     duration: int,
     reaction_count: int,
+    min_gap: float = MIN_GAP_SECONDS,
 ) -> list[dict[str, Any]]:
     """校验/清洗模型返回的陪看脚本：时间越界、非法情绪、间隔过密、排序。"""
     if isinstance(raw, str):
@@ -318,7 +324,7 @@ def normalize_reactions(
     result: list[dict[str, Any]] = []
     last_at: Optional[float] = None
     for item in cleaned:
-        if last_at is not None and item["at"] - last_at < MIN_GAP_SECONDS:
+        if last_at is not None and item["at"] - last_at < min_gap:
             continue
         result.append(item)
         last_at = item["at"]

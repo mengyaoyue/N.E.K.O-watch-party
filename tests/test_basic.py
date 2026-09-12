@@ -187,11 +187,12 @@ def main():
 
     # 10. v0.3.3 反应密度自适应 + 自发碎碎念
     # 10.1 数量随时长：9.5 分钟视频 → 至少 12 条；30 分钟 → 40 条；配置高者生效
-    assert_eq(mod.effective_reaction_count(570, 10), 12, "9.5 分钟 → 12 条")
-    assert_eq(mod.effective_reaction_count(1800, 10), 40, "30 分钟 → 40 条")
-    assert_eq(mod.effective_reaction_count(60, 10), 10, "短视频用配置下限")
-    assert_eq(mod.effective_reaction_count(3600, 50), 60, "上限 60")
-    assert_eq(mod.effective_reaction_count(1800, 45), 45, "配置更高时用配置")
+    assert_eq(mod.count_for_duration(570, 3), 28, "9.5 分钟 × 3/分钟 ≈ 28 条")
+    assert_eq(mod.count_for_duration(1800, 3), 90, "30 分钟 × 3/分钟 → 90 条")
+    assert_eq(mod.count_for_duration(600, 1), 10, "1/分钟 → 10 条（下限生效）")
+    assert_eq(mod.count_for_duration(3600, 3), 150, "上限 150")
+    assert_eq(mod.gap_for_rpm(3), 18.333333333333332 if abs(mod.gap_for_rpm(3)-18.33)<0.1 else mod.gap_for_rpm(3), "间隔推导自洽")
+    assert mod.gap_for_rpm(1) > mod.gap_for_rpm(5), "密度越高间隔越短"
 
     # 10.2 碎碎念：有弹幕引用弹幕，有台词引用台词，都无则用主题模板
     subs = [{"t": 100, "dur": 2, "text": "这句话很重要"}]

@@ -41,7 +41,8 @@ from ._watch_logic import (
     parse_danmaku_xml,
     parse_video_id,
     sample_danmaku,
-    effective_reaction_count,
+    count_for_duration as effective_reaction_count,
+    gap_for_rpm,
     spontaneous_remark,)
 
 _PLUGIN_ID = "neko_watch_party"
@@ -247,9 +248,9 @@ class WatchPartyPlugin(NekoPluginBase):
         self.auto_summary = bool(section.get("auto_summary", True))
         self.auto_begin = _safe_bool(section.get("auto_begin"), True)
         self.auto_density = _safe_bool(section.get("auto_density"), True)
+        self.reactions_per_minute = max(0.5, min(10.0, float(_safe_int(section.get("reactions_per_minute"), 3))))
         self.heartbeat_minutes = max(0, _safe_int(section.get("heartbeat_minutes"), 5))
         self.bili_sessdata = _safe_str(section.get("bili_sessdata"))
-        self.auto_density = _safe_bool(section.get("auto_density"), True)
         self.screen_assist = _safe_bool(section.get("screen_assist"), False)
         self.screen_on_react = _safe_bool(section.get("screen_on_react"), True)
         self.catgirl_name = _safe_str(section.get("catgirl_name"), "猫娘") or "猫娘"
@@ -271,6 +272,14 @@ class WatchPartyPlugin(NekoPluginBase):
         )
         self._tick_thread.start()
         self._loop = asyncio.get_running_loop()
+        try:
+            state_path = Path(self.data_path()) / "panel_state.json"
+            saved = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+            saved_rpm = saved.get("reactions_per_minute")
+            if saved_rpm:
+                self.reactions_per_minute = max(0.5, min(10.0, float(saved_rpm)))
+        except Exception:
+            pass
         self._start_panel()
         self.logger.info("[watch_party] 启动：reaction_count={}", self.reaction_count)
         return Ok({"status": "running", "version": "0.1.0"})
@@ -412,20 +421,21 @@ class WatchPartyPlugin(NekoPluginBase):
 
         subtitle_text = subtitles_to_text(subtitles)
         sampled = sample_danmaku(danmaku)
+        rpm = self.reactions_per_minute if self.auto_density else max(1.0, 60.0 / max(1, self.reaction_count))
+        want = effective_reaction_count(video["duration"], rpm, floor=self.reaction_count)
+        gap = gap_for_rpm(rpm)
         prompt = build_script_prompt_v2(
             video["title"], video["desc"], video["up"], video["duration"],
-            subtitle_text, sampled, comments, self.reaction_count,
+            subtitle_text, sampled, comments, want, min_gap=gap,
         )
         raw = await _call_llm("你是陪看猫娘的脚本引擎。", prompt, self.llm_timeout)
-        want = (effective_reaction_count(video["duration"], self.reaction_count)
-                if self.auto_density else self.reaction_count)
-        reactions = normalize_reactions(raw, video["duration"], want)
+        reactions = normalize_reactions(raw, video["duration"], want, min_gap=gap)
         if not reactions:
             reactions = self._fallback_reactions(video["duration"], danmaku)
             self.logger.warning("[watch_party] LLM 脚本不可用，降级弹幕高能点模式")
         self.logger.info(
-            "[watch_party] 预习⑤陪看脚本 {} 条（时长 {}s → 目标 {} 条，共 {:.1f}s）",
-            len(reactions), video["duration"], want, time.time() - t0,
+            "[watch_party] 预习⑤陪看脚本 {} 条（时长 {}s，密度 {}/分钟 → 目标 {} 条，间隔≥{}s，共 {:.1f}s）",
+            len(reactions), video["duration"], rpm, want, int(gap), time.time() - t0,
         )
         return {
             "video": video,
@@ -555,6 +565,7 @@ class WatchPartyPlugin(NekoPluginBase):
             "position": int(position),
             "fired": len(session["fired"]), "total": len(session["reactions"]),
             "screen_assist": self.screen_assist,
+            "reactions_per_minute": self.reactions_per_minute,
         }
 
     def _panel_stop(self, _body: dict[str, Any]) -> dict[str, Any]:
@@ -566,6 +577,19 @@ class WatchPartyPlugin(NekoPluginBase):
         summary = build_summary(session["video"], session["danmaku"], session["fired"], session["comments"])
         self._push("好呀，先停在这里喵。" + chr(10) + summary)
         return {"ok": True}
+
+    def _panel_config(self, body: dict[str, Any]) -> dict[str, Any]:
+        if "rpm" in body:
+            self.reactions_per_minute = max(0.5, min(10.0, float(body["rpm"])))
+            state_path = Path(self.data_path()) / "panel_state.json"
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+                state["reactions_per_minute"] = self.reactions_per_minute
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        return {"ok": True, "rpm": self.reactions_per_minute}
 
     def _panel_jump(self, body: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -616,6 +640,7 @@ class WatchPartyPlugin(NekoPluginBase):
             ("POST", "/api/jump"): self._panel_jump,
             ("POST", "/api/start"): self._panel_start_watch,
             ("POST", "/api/react"): self._panel_react,
+            ("POST", "/api/config"): self._panel_config,
         }
         port = find_open_port(self._panel_port)
         server = PanelServer(port, self._panel_html, endpoints)
