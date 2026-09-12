@@ -30,10 +30,9 @@ from plugin.sdk.plugin import (
     plugin_entry,
 )
 
-from ._panel import PanelServer, find_open_port, _PAGE_CSS
-from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window
+from ._panel import PanelServer, find_open_port
+from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window, subtitles_to_text
 from ._screen import capture_screen_text, build_screen_context
-from ._watch_logic import build_script_prompt as build_script_prompt_v2
 from ._watch_logic import (
     build_summary,
     format_reaction,
@@ -182,7 +181,7 @@ def build_script_prompt_v2(
     reaction_count: int,
 ) -> str:
     """字幕优先的陪看脚本提示词：有字幕时反应挂在台词时间轴上。"""
-    from ._watch_logic import build_script_prompt, MIN_GAP_SECONDS, _MAX_TEXT_CHARS
+    from ._watch_logic import build_script_prompt
 
     base = build_script_prompt(
         title, desc, up_name, duration, sampled_danmaku, comments, reaction_count,
@@ -312,7 +311,7 @@ class WatchPartyPlugin(NekoPluginBase):
                 self.logger.info("[watch_party] 页面通道成功：{}", info.get("title", "")[:30])
                 return info
             raise SdkError(
-                f"呜…视频信息没拿到喵（接口码 {code}；页面通道: {err or '无数据'}）。"
+                f"呜…视频信息没拿到喵（B站接口异常；页面通道: {err or '无数据'}）。"
                 "大概率是B站对本机临时风控，歇几分钟再试就好。"
             )
         v = data.get("data") or {}
