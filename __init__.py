@@ -31,7 +31,7 @@ from plugin.sdk.plugin import (
 )
 
 from ._panel import PanelServer, find_open_port, _PAGE_CSS
-from ._bili_data import fetch_subtitles, subtitle_window
+from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window
 from ._screen import capture_screen_text, build_screen_context
 from ._watch_logic import build_script_prompt as build_script_prompt_v2
 from ._watch_logic import (
@@ -305,10 +305,15 @@ class WatchPartyPlugin(NekoPluginBase):
             url = f"https://api.bilibili.com/x/web-interface/view?aid={video_id['aid']}"
         data = await asyncio.to_thread(_http_get_json, url, cookie, self.request_timeout)
         if not data or data.get("code") != 0:
-            code = (data or {}).get("code")
+            # API 被风控（412 等）→ 页面通道：真浏览器开视频页提取
+            self.logger.warning("[watch_party] 视频接口失败(code={}), 切换页面通道", (data or {}).get("code"))
+            info, _dm, err = await asyncio.to_thread(fetch_via_page, video_id.get("bvid", ""), self.request_timeout)
+            if info:
+                self.logger.info("[watch_party] 页面通道成功：{}", info.get("title", "")[:30])
+                return info
             raise SdkError(
-                f"呜…视频信息没拿到喵（接口码 {code}）。"
-                "如果反复出现，多半是B站对本机临时风控（请求太频繁），歇几分钟再试就好。"
+                f"呜…视频信息没拿到喵（接口码 {code}；页面通道: {err or '无数据'}）。"
+                "大概率是B站对本机临时风控，歇几分钟再试就好。"
             )
         v = data.get("data") or {}
         page = max(1, _safe_int(video_id.get("page"), 1))
@@ -330,13 +335,22 @@ class WatchPartyPlugin(NekoPluginBase):
             "view": _safe_int((v.get("stat") or {}).get("view"), 0),
         }
 
-    async def _fetch_danmaku(self, cid: int) -> list[dict[str, Any]]:
+    async def _fetch_danmaku(self, cid: int, bvid: str = "") -> list[dict[str, Any]]:
         url = f"https://api.bilibili.com/x/v1/dm/list.so?oid={cid}"
         status, body = await asyncio.to_thread(_http_get, url, "", self.request_timeout)
-        if status != 200 or not body:
-            self.logger.warning("[watch_party] 弹幕获取失败 status={}", status)
-            return []
-        return parse_danmaku_xml(body)
+        if status == 200 and body:
+            return parse_danmaku_xml(body)
+        self.logger.warning("[watch_party] 弹幕接口失败 status={}, 尝试页面通道", status)
+        if bvid:
+            try:
+                _info, danmaku, err = await asyncio.to_thread(fetch_via_page, bvid, self.request_timeout)
+                if danmaku:
+                    self.logger.info("[watch_party] 页面通道弹幕 {} 条", len(danmaku))
+                    return danmaku
+                self.logger.warning("[watch_party] 页面通道弹幕失败: {}", err)
+            except Exception as exc:
+                self.logger.warning("[watch_party] 页面通道弹幕异常: {}", exc)
+        return []
 
     async def _fetch_comments(self, aid: int) -> list[str]:
         """热评抓取（可降级）：失败返回空列表。"""
@@ -371,7 +385,7 @@ class WatchPartyPlugin(NekoPluginBase):
             video.get("bvid"), video.get("cid"), video.get("duration"), time.time() - t0,
         )
 
-        danmaku = await self._fetch_danmaku(video["cid"])
+        danmaku = await self._fetch_danmaku(video["cid"], video.get("bvid", ""))
         self.logger.info("[watch_party] 预习②弹幕 {} 条", len(danmaku))
         await asyncio.sleep(0.3)
 

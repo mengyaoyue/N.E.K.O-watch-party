@@ -224,3 +224,97 @@ def subtitles_to_text(
         minutes, seconds = divmod(int(s["t"]), 60)
         lines.append(f"[{minutes:02d}:{seconds:02d}] {s['text']}")
     return "\n".join(lines)
+
+
+# ── 页面通道（IP 风控时的备用入口）────────────────────────────────
+# API 接口被 412 时，用真浏览器打开视频页：
+#   1. window.__INITIAL_STATE__.videoData 提取 标题/aid/cid/时长/UP主
+#   2. 页面上下文里带凭证 fetch 弹幕接口（浏览器自动处理压缩与 cookie）
+
+_PAGE_STATE_JS = """() => {
+    const s = window.__INITIAL_STATE__ || {};
+    const v = s.videoData || {};
+    return {title: v.title || '', bvid: v.bvid || '', aid: v.aid || 0,
+            cid: v.cid || 0, duration: v.duration || 0,
+            up: (v.owner || {}).name || '', ok: !!v.title};
+}"""
+
+_PAGE_DANMAKU_JS = """async (cid) => {
+    const r = await fetch(`https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`, {credentials: 'include'});
+    const buf = new Uint8Array(await r.arrayBuffer());
+    return Array.from(buf);
+}"""
+
+
+def _browser_channel_sync(bvid: str, timeout: float = 30.0) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]], str]:
+    """真浏览器走视频页拿信息+弹幕。返回 (info, danmaku, error)。"""
+    from playwright.sync_api import sync_playwright
+
+    info: dict[str, Any] = {}
+    danmaku: list[dict[str, Any]] = []
+    error = ""
+    with sync_playwright() as p:
+        browser = None
+        for channel in (None, "msedge", "chrome"):
+            try:
+                browser = (
+                    p.chromium.launch(headless=True, channel=channel)
+                    if channel
+                    else p.chromium.launch(headless=True)
+                )
+                break
+            except Exception:
+                browser = None
+        if browser is None:
+            return {}, [], "浏览器内核不可用（chromium/Edge/chrome 全失败）"
+        page = browser.new_page(user_agent=_UA, locale="zh-CN")
+        try:
+            page.goto(
+                f"https://www.bilibili.com/video/{bvid}/",
+                timeout=int(timeout * 1000),
+                wait_until="load",
+            )
+            page.wait_for_timeout(3000)
+            for _ in range(3):
+                try:
+                    state = page.evaluate(_PAGE_STATE_JS)
+                    if state and state.get("ok"):
+                        info = {
+                            "bvid": str(state.get("bvid") or bvid),
+                            "aid": int(state.get("aid") or 0),
+                            "title": str(state.get("title") or "未知标题"),
+                            "desc": "",
+                            "up": str(state.get("up") or "未知UP主"),
+                            "duration": int(state.get("duration") or 0),
+                            "cid": int(state.get("cid") or 0),
+                        }
+                        break
+                except Exception:
+                    page.wait_for_timeout(1500)
+            if info.get("cid"):
+                raw = page.evaluate(_PAGE_DANMAKU_JS, info["cid"])
+                xml_bytes = bytes(raw or [])
+                try:
+                    from . import _watch_logic as _wl
+                except ImportError:  # 独立加载（测试）
+                    import importlib.util as _ilu
+
+                    _spec = _ilu.spec_from_file_location(
+                        "neko_watch_party_logic",
+                        str(__import__("pathlib").Path(__file__).parent / "_watch_logic.py"),
+                    )
+                    _wl = _ilu.module_from_spec(_spec)
+                    _spec.loader.exec_module(_wl)
+                danmaku = _wl.parse_danmaku_xml(xml_bytes)
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            browser.close()
+    if not info and not error:
+        error = "视频页加载了但拿不到 INITIAL_STATE"
+    return info, danmaku, error
+
+
+def fetch_via_page(bvid: str, timeout: float = 30.0) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+    """对外入口：页面通道（真浏览器）。见 _browser_channel_sync。"""
+    return _browser_channel_sync(bvid, timeout)
