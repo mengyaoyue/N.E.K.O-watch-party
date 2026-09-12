@@ -26,6 +26,13 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
   <h1>🎬 陪看猫娘 · 管理面板</h1>
   <div class="sub">猫娘陪你刷B站：预习视频、读弹幕、按进度共情吐槽</div>
   <div class="card">
+    <h2>开始新的陪看</h2>
+    <input type="text" id="video" placeholder="粘贴B站链接或BV号，如 BV1xx411c7mD" style="width:calc(100% - 130px);background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:8px 12px;font-size:14px">
+    <button onclick="startWatch()">开始陪看</button>
+    <button onclick="reactNow()">刚才那段</button>
+    <div id="result" class="sub" style="margin-top:10px;white-space:pre-wrap"></div>
+  </div>
+  <div class="card">
     <h2>陪看会话</h2>
     <table class="kv" id="kv"></table>
     <div class="bar"><div id="bar" style="width:0%"></div></div>
@@ -51,6 +58,25 @@ async function api(path,opts){
   throw new Error("面板服务不可达喵");
 }
 function fmt(s){return `${Math.floor(s/60)}分${String(Math.floor(s)%60).padStart(2,"0")}秒`}
+async function startWatch(){
+  const video=document.getElementById("video").value.trim();
+  if(!video){alert("先粘贴链接或BV号喵");return}
+  const res=document.getElementById("result");
+  res.textContent="预习中喵（抓弹幕+热评+生成吐槽脚本，约 10~30 秒）…";
+  try{
+    const d=await api("/api/start",{method:"POST",body:JSON.stringify({video})});
+    res.textContent=d.ok?("✅ "+d.message):("❌ "+d.error);
+    await loadStatus();
+  }catch(e){res.textContent="失败："+e}
+}
+async function reactNow(){
+  const res=document.getElementById("result");
+  res.textContent="本喵看一眼…";
+  try{
+    const d=await api("/api/react",{method:"POST",body:"{}"});
+    res.textContent=d.ok?("🐱 "+d.message):("❌ "+d.error);
+  }catch(e){res.textContent="失败："+e}
+}
 async function loadStatus(){
   try{
     const d=await api("/api/status");

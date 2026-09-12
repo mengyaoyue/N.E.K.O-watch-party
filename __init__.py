@@ -228,6 +228,7 @@ class WatchPartyPlugin(NekoPluginBase):
         self._tick_thread: Optional[threading.Thread] = None
         self._panel_server = None
         self._panel_port: int = 15690
+        self._loop = None
 
     # ── 配置 ───────────────────────────────────────────────────
     async def _load_config(self) -> None:
@@ -266,6 +267,7 @@ class WatchPartyPlugin(NekoPluginBase):
             target=self._tick_loop, daemon=True, name="neko-watch-party-tick"
         )
         self._tick_thread.start()
+        self._loop = asyncio.get_running_loop()
         self._start_panel()
         self.logger.info("[watch_party] 启动：reaction_count={}", self.reaction_count)
         return Ok({"status": "running", "version": "0.1.0"})
@@ -563,6 +565,32 @@ class WatchPartyPlugin(NekoPluginBase):
             session["offset"] += target - self._current_position(session)
         return {"ok": True, "position": int(target)}
 
+    def _run_async(self, coro, timeout: float):
+        if self._loop is None or self._loop.is_closed():
+            raise RuntimeError("事件循环不可用喵")
+        import concurrent.futures as _cf
+
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=timeout)
+
+    def _panel_start_watch(self, body: dict[str, Any]) -> dict[str, Any]:
+        video = str(body.get("video") or "").strip()
+        if not video:
+            return {"ok": False, "error": "要填视频链接或BV号喵"}
+        try:
+            intro = self._run_async(self._start(video), timeout=150)
+            begin_text = self._run_async(self._begin(), timeout=30)
+            return {"ok": True, "message": intro + chr(10) + begin_text}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _panel_react(self, _body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            text = self._run_async(self._react_now(), timeout=60)
+            return {"ok": True, "message": text}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _panel_html(self) -> str:
         page = Path(__file__).parent / "static" / "index.html"
         try:
@@ -575,6 +603,8 @@ class WatchPartyPlugin(NekoPluginBase):
             ("GET", "/api/status"): self._panel_status,
             ("POST", "/api/stop"): self._panel_stop,
             ("POST", "/api/jump"): self._panel_jump,
+            ("POST", "/api/start"): self._panel_start_watch,
+            ("POST", "/api/react"): self._panel_react,
         }
         port = find_open_port(self._panel_port)
         server = PanelServer(port, self._panel_html, endpoints)
