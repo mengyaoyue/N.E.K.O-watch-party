@@ -248,6 +248,13 @@ class WatchPartyPlugin(NekoPluginBase):
         )
         self._tick_thread.start()
         self._start_panel_loop()
+        if not self.bili_sessdata:
+            try:
+                state_path = Path(self.data_path()) / "panel_state.json"
+                saved = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+                self.bili_sessdata = str(saved.get("bili_sessdata") or "")
+            except Exception:
+                pass
         try:
             state_path = Path(self.data_path()) / "panel_state.json"
             saved = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
@@ -548,6 +555,7 @@ class WatchPartyPlugin(NekoPluginBase):
             "fired": len(session["fired"]), "total": len(session["reactions"]),
             "screen_assist": self.screen_assist,
             "reactions_per_minute": self.reactions_per_minute,
+            "sessdata_set": bool(self.bili_sessdata),
         }
 
     def _panel_stop(self, _body: dict[str, Any]) -> dict[str, Any]:
@@ -572,6 +580,26 @@ class WatchPartyPlugin(NekoPluginBase):
             except Exception:
                 pass
         return {"ok": True, "rpm": self.reactions_per_minute}
+
+    def _panel_save_sessdata(self, body: dict[str, Any]) -> dict[str, Any]:
+        value = str(body.get("sessdata") or "").strip()
+        state_path = Path(self.data_path()) / "panel_state.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        except Exception:
+            state = {}
+        if value:
+            self.bili_sessdata = value
+            state["bili_sessdata"] = value
+        else:
+            self.bili_sessdata = ""
+            state.pop("bili_sessdata", None)
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return {"ok": True, "sessdata_set": bool(self.bili_sessdata)}
 
     def _panel_jump(self, body: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -637,6 +665,7 @@ class WatchPartyPlugin(NekoPluginBase):
             ("POST", "/api/start"): self._panel_start_watch,
             ("POST", "/api/react"): self._panel_react,
             ("POST", "/api/config"): self._panel_config,
+            ("POST", "/api/sessdata"): self._panel_save_sessdata,
         }
         port = find_open_port(self._panel_port)
         server = PanelServer(port, self._panel_html, endpoints)

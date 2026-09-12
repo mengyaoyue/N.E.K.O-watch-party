@@ -41,6 +41,13 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
     <h2>陪看会话</h2>
     <table class="kv" id="kv"></table>
     <div class="bar"><div id="bar" style="width:0%"></div></div>
+    <div style="margin:12px 0;padding-top:10px;border-top:1px solid #322b4a">
+      <div>字幕模式（B站登录凭证）：<span id="sd" class="toggle">…</span></div>
+      <input type="password" id="sessdata" placeholder="粘贴 SESSDATA（本地存储，不上传）" style="width:calc(100% - 130px);margin:8px 0;background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:8px 12px;font-size:13px">
+      <button onclick="saveSess()">保存凭证</button>
+      <button class="danger" onclick="clearSess()">清除</button>
+      <div class="sub">获取方法：浏览器登录B站 → F12 → 应用/Application → Cookie → bilibili.com → 复制 SESSDATA 的值。有效期数月，失效了重新复制一次即可。</div>
+    </div>
     <div style="margin:10px 0">反应密度：<input type="number" id="rpm" value="3" min="1" max="10" step="1"> 条/分钟
       <button onclick="saveRpm()">保存密度</button>（下次预习生效，1~10）</div>
     <input type="number" id="minute" value="0" min="0"> 分钟
@@ -96,12 +103,22 @@ async function loadStatus(){
       <tr><td>反应点</td><td>${d.fired} / ${d.total} 已触发${d.screen_assist?" · 📷 截屏辅助开":""}</td></tr>`;
     document.getElementById("bar").style.width=pct+"%";
     if(d.reactions_per_minute) document.getElementById("rpm").value=d.reactions_per_minute;
+    const sd=document.getElementById("sd");
+    sd.textContent=d.sessdata_set?"已启用（字幕模式）":"未设置（弹幕模式）";
+    sd.className="toggle "+(d.sessdata_set?"on":"off");
     document.getElementById("status").textContent="已更新喵～";
   }catch(e){document.getElementById("status").textContent="加载失败："+e}
 }
 async function saveRpm(){
   const rpm=parseFloat(document.getElementById("rpm").value)||3;
   try{await api("/api/config",{method:"POST",body:JSON.stringify({rpm})});await loadStatus()}catch(e){alert(e)}
+}
+async function saveSess(){
+  const v=document.getElementById("sessdata").value.trim();
+  try{await api("/api/sessdata",{method:"POST",body:JSON.stringify({sessdata:v})});await loadStatus()}catch(e){alert(e)}
+}
+async function clearSess(){
+  try{await api("/api/sessdata",{method:"POST",body:"{}"});document.getElementById("sessdata").value="";await loadStatus()}catch(e){alert(e)}
 }
 async function jump(){
   const m=parseFloat(document.getElementById("minute").value)||0;
