@@ -74,7 +74,7 @@ async function api(path,opts){
   }
   throw new Error("面板服务不可达喵");
 }
-function fmt(s){return `${Math.floor(s/60)}分${String(Math.floor(s)%60).padStart(2,"0")}秒`}
+function fmt(s){s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=String(s%60).padStart(2,"0");return h?`${h}:${String(m).padStart(2,"0")}:${ss}`:`${m}分${ss}秒`}
 async function startWatch(){
   const video=document.getElementById("video").value.trim();
   if(!video){alert("先粘贴链接或BV号喵");return}

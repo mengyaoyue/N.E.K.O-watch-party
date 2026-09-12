@@ -252,6 +252,24 @@ def main():
     assert "reaction_lead_seconds" in src_init, "应有反应提前量配置"
     assert "position + lead" in src_init, "触发应带提前量"
     assert "画面上是「" in src_init, "截屏开启时应以画面为主参考"
+
+    # 16. v0.4.3 自动对齐防时钟误判 + 小时格式化
+    # 16.1 单独出现的时间一律不认（系统时钟 21:47 在屏幕底部也不行）
+    clock = [{"text": "21:47", "x": 1400, "y": 1040}]  # 任务栏时钟位置
+    assert scr.extract_playback_time(clock, screen_h=1080) is None, "系统时钟不得当播放进度"
+
+    # 16.2 成对才认，且 position ≤ total
+    pair = [{"text": "01:23 / 09:30", "x": 700, "y": 940}]
+    got = scr.extract_playback_time(pair, screen_h=1080)
+    assert got and got["position"] == 83 and got["total"] == 570, f"成对: {got!r}"
+    reversed_pair = [{"text": "09:30 / 01:23", "x": 700, "y": 940}]
+    got = scr.extract_playback_time(reversed_pair, screen_h=1080)
+    assert got["position"] == 83 and got["total"] == 570, "顺序颠倒应自动纠正"
+
+    # 16.3 fmt_pos 小时格式化
+    assert_eq(mod.fmt_pos(83), "01:23", "分秒格式")
+    assert_eq(mod.fmt_pos(3724), "1:02:04", "小时格式")
+    assert_eq(mod.fmt_pos(0), "00:00", "零")
     print("全部测试通过 ✅")
 
 

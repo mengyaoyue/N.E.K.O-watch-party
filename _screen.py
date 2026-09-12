@@ -78,37 +78,25 @@ _TIME_RE = re.compile(r"(?<![0-9])([0-9]{1,2}):([0-5][0-9])(?::([0-5][0-9]))?(?!
 def extract_playback_time(ocr_items: list[dict[str, Any]], screen_h: int) -> Optional[dict[str, int]]:
     """从 OCR 结果里找播放器进度时间。
 
-    策略：优先找"当前 / 总时长"成对出现的模式（如 01:23 / 09:30），
-    且候选位于屏幕下部（控制栏区域）。返回 {position, total}，找不到 None。
+    只认"当前 / 总时长"成对格式（如 01:23 / 09:30）——
+    单独出现的时间一律不采信：系统时钟（21:47）、视频时长标签都在屏幕底部，
+    误认会把本地时间当成播放进度（真实事故）。
+    返回 {position, total}，找不到 None。
     """
-    bottom_items = [it for it in ocr_items if it.get("y", 0) >= screen_h * 0.65]
-    candidates: list[dict[str, int]] = []
-    pool = bottom_items + ocr_items  # 底部优先，但保留全文兜底
-    for it in pool:
+    pair_re = re.compile(
+        r"([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)\s*/\s*([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)"
+    )
+    for it in ocr_items:
         text = it.get("text", "")
-        matches = list(_TIME_RE.finditer(text))
-        if not matches:
+        m = pair_re.search(text)
+        if not m:
             continue
-        pair = re.search(
-            r"([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)\s*/\s*([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)", text
-        )
-        if pair:
-            pos = _to_seconds(pair.group(1))
-            total = _to_seconds(pair.group(2))
-            if pos is not None and total is not None and 0 <= pos <= total:
-                candidates.append({"position": pos, "total": total})
-                continue
-        for m in matches:
-            sec = _to_seconds(m.group(0))
-            if sec is not None and sec > 3:
-                candidates.append({"position": sec, "total": 0})
-    if not candidates:
-        return None
-    with_total = [c for c in candidates if c["total"] > 0]
-    chosen = (with_total or candidates)[0]
-    if chosen["total"] and chosen["position"] > chosen["total"]:
-        chosen = {"position": chosen["total"], "total": chosen["position"]}
-    return chosen
+        pos = _to_seconds(m.group(1))
+        total = _to_seconds(m.group(2))
+        if pos is None or total is None or total == 0 or pos > total:
+            continue
+        return {"position": pos, "total": total}
+    return None
 
 
 def _to_seconds(text: str) -> Optional[int]:

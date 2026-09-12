@@ -410,11 +410,20 @@ def format_video_intro(video: dict[str, Any], danmaku_count: int, comment_count:
     )
 
 
+def fmt_pos(seconds: int) -> str:
+    """把秒数格式化成 04:23 / 1:04:23（超过 1 小时带小时位）。"""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def format_reaction(reaction: dict[str, Any], position: float) -> str:
     """把一条反应渲染成推送文本（带时间点与表情）。"""
     emoji = EMOTIONS.get(reaction.get("emotion", ""), "🐱")
-    minutes, seconds = divmod(int(position), 60)
-    return f"{emoji} [{minutes:02d}:{seconds:02d}] {reaction.get('text', '')}"
+    return f"{emoji} [{fmt_pos(int(position))}] {reaction.get('text', '')}"
 
 
 def spontaneous_remark(

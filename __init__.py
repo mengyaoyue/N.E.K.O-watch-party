@@ -549,7 +549,6 @@ class WatchPartyPlugin(NekoPluginBase):
                 aligned, aligned_note = self._auto_align(position)
                 if aligned is not None:
                     position = aligned
-                    minutes, seconds = divmod(int(position), 60)
             recent_fired = [r for r in session["fired"] if abs(r["at"] - position) <= 45]
             if not recent_fired:
                 remark = spontaneous_remark(
@@ -565,7 +564,9 @@ class WatchPartyPlugin(NekoPluginBase):
                         remark += f"（瞄到你画面上有「{shot['text'][:26]}」喵）"
                 self._push(f"💬 {minutes}分{seconds:02d}：{remark}")
             else:
-                self._push(f"⏱ 陪看中喵～放到 {minutes} 分{seconds:02d} 秒，要校准就说「跳到 X 分」")
+                from ._watch_logic import fmt_pos
+
+                self._push(f"⏱ 陪看中喵～放到 {fmt_pos(int(position))}，要校准就说「跳到 X 分」")
 
         # 播完自动总结
         if (
@@ -830,8 +831,9 @@ class WatchPartyPlugin(NekoPluginBase):
             "[watch_party] 自动对齐：{}s → {}s（偏差 {:+d}s）",
             int(current_position), got["position"], int(drift),
         )
-        minutes, seconds = divmod(got["position"], 60)
-        return float(got["position"]), f"已自动对齐到 {minutes} 分{seconds:02d} 秒喵"
+        from ._watch_logic import fmt_pos
+
+        return float(got["position"]), f"已自动对齐到 {fmt_pos(got['position'])} 喵"
 
     async def _read_comments(self) -> str:
         await self._ensure_config_loaded()
