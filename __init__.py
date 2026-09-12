@@ -1,3 +1,4 @@
+from __future__ import annotations
 """陪看猫娘（neko_watch_party）v0.1 · 作者：MENGYAOYUE
 
 陪主人看B站视频：抓视频信息 + 全量弹幕 + 热评，一次 LLM 调用生成"陪看脚本"
@@ -7,7 +8,7 @@
 数据全部匿名读取公开接口（UA + buvid3），零第三方依赖；评论接口失败自动降级。
 """
 
-from __future__ import annotations
+from pathlib import Path
 
 import asyncio
 import json
