@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>陪看猫娘 · 管理面板</title>
+<style>
+body{margin:0;font-family:'Microsoft YaHei',sans-serif;background:#1b1826;color:#e8e4f2;display:flex;justify-content:center;padding:24px}
+.wrap{max-width:720px;width:100%}
+h1{font-size:24px;margin:8px 0 4px}
+.sub{color:#9a93b5;font-size:14px;margin-bottom:16px}
+.card{background:#241f33;border:1px solid #3a3352;border-radius:16px;padding:16px;margin-bottom:16px}
+.card h2{font-size:17px;margin:2px 0 12px;color:#c9b9ff}
+button{background:#6c5ce7;color:#fff;border:0;border-radius:10px;padding:8px 18px;font-size:14px;cursor:pointer;margin-right:8px}
+button:hover{background:#7d6ef0}
+button.danger{background:#a33b52}
+input[type=number]{background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:6px 10px;font-size:14px;width:90px}
+.bar{background:#2a2440;border-radius:10px;height:14px;overflow:hidden;margin:10px 0}
+.bar div{background:#7d6ef0;height:100%}
+#status{color:#9a93b5;font-size:13px;margin-left:8px}
+.kv td:first-child{color:#9a93b5;width:150px}
+td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎬 陪看猫娘 · 管理面板</h1>
+  <div class="sub">猫娘陪你刷B站：预习视频、读弹幕、按进度共情吐槽</div>
+  <div class="card">
+    <h2>陪看会话</h2>
+    <table class="kv" id="kv"></table>
+    <div class="bar"><div id="bar" style="width:0%"></div></div>
+    <input type="number" id="minute" value="0" min="0"> 分钟
+    <button onclick="jump()">跳到</button>
+    <button class="danger" onclick="stop()">结束陪看</button>
+    <button onclick="loadStatus()">刷新</button>
+    <span id="status"></span>
+  </div>
+  <div class="card">
+    <h2>使用说明</h2>
+    <div class="sub">对猫娘说「陪我看」+ B站链接或BV号开始；「跳到 X 分」校准进度；「刚才那段什么梗」现场解读。反应会按播放进度自动弹出喵。</div>
+  </div>
+</div>
+<script>
+function findBase(){const b=[""];for(let p=15690;p<=15694;p++)b.push(`http://127.0.0.1:${p}`);return b}
+let API_BASE=localStorage.getItem("wp_base")||"";
+async function api(path,opts){
+  const bases=[API_BASE,...findBase()].filter((v,i,a)=>a.indexOf(v)===i);
+  for(const base of bases){
+    try{const r=await fetch(base+path,opts);if(r.ok){API_BASE=base;localStorage.setItem("wp_base",base);return await r.json();}}catch(e){}
+  }
+  throw new Error("面板服务不可达喵");
+}
+function fmt(s){return `${Math.floor(s/60)}分${String(Math.floor(s)%60).padStart(2,"0")}秒`}
+async function loadStatus(){
+  try{
+    const d=await api("/api/status");
+    const kv=document.getElementById("kv");
+    if(!d.prepared){kv.innerHTML="<tr><td>当前没有陪看会话喵。对猫娘发B站链接即可开始～</td></tr>";document.getElementById("bar").style.width="0%";return}
+    const pct=Math.min(100,Math.round(d.position/d.duration*100));
+    kv.innerHTML=`<tr><td>状态</td><td>${d.watching?"▶️ 陪看中":"⏸️ 已预习未开始"}</td></tr>
+      <tr><td>视频</td><td>${d.title}（${d.bvid}）</td></tr>
+      <tr><td>进度</td><td>${fmt(d.position)} / ${fmt(d.duration)}</td></tr>
+      <tr><td>反应点</td><td>${d.fired} / ${d.total} 已触发</td></tr>`;
+    document.getElementById("bar").style.width=pct+"%";
+    document.getElementById("status").textContent="已更新喵～";
+  }catch(e){document.getElementById("status").textContent="加载失败："+e}
+}
+async function jump(){
+  const m=parseFloat(document.getElementById("minute").value)||0;
+  try{await api("/api/jump",{method:"POST",body:JSON.stringify({minute:m})});await loadStatus()}catch(e){alert(e)}
+}
+async function stop(){
+  try{await api("/api/stop",{method:"POST",body:"{}"});await loadStatus()}catch(e){alert(e)}
+}
+loadStatus();setInterval(loadStatus,5000);
+</script>
+</body>
+</html>

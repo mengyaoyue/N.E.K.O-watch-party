@@ -29,6 +29,7 @@ from plugin.sdk.plugin import (
     plugin_entry,
 )
 
+from ._panel import PanelServer, find_open_port, _PAGE_CSS
 from ._watch_logic import (
     build_script_prompt,
     build_summary,
@@ -169,6 +170,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._tick_thread: Optional[threading.Thread] = None
+        self._panel_server = None
+        self._panel_port: int = 15690
 
     # ── 配置 ───────────────────────────────────────────────────
     async def _load_config(self) -> None:
@@ -202,11 +205,14 @@ class WatchPartyPlugin(NekoPluginBase):
             target=self._tick_loop, daemon=True, name="neko-watch-party-tick"
         )
         self._tick_thread.start()
+        self._start_panel()
         self.logger.info("[watch_party] 启动：reaction_count={}", self.reaction_count)
         return Ok({"status": "running", "version": "0.1.0"})
 
     @lifecycle(id="shutdown")
     def shutdown(self, **_):
+        if self._panel_server:
+            self._panel_server.stop()
         self._stop_event.set()
         self._wake_event.set()
         if self._tick_thread and self._tick_thread.is_alive():
@@ -397,6 +403,68 @@ class WatchPartyPlugin(NekoPluginBase):
             )
         except Exception:
             self.logger.exception("[watch_party] push_message 失败")
+
+    # ── 管理面板 ───────────────────────────────────────────────
+    def _panel_status(self, _body: dict[str, Any]) -> dict[str, Any]:
+        session = self._session
+        if not session:
+            return {"watching": False, "prepared": False}
+        video = session["video"]
+        watching = session.get("start_epoch") is not None
+        position = self._current_position(session) if watching else float(session.get("offset", 0))
+        return {
+            "watching": watching, "prepared": True,
+            "title": video.get("title", ""), "bvid": video.get("bvid", ""),
+            "duration": video.get("duration", 0),
+            "position": int(position),
+            "fired": len(session["fired"]), "total": len(session["reactions"]),
+        }
+
+    def _panel_stop(self, _body: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            session = self._session
+            self._session = None
+        if not session:
+            return {"ok": True, "message": "本来就没在看喵"}
+        summary = build_summary(session["video"], session["danmaku"], session["fired"], session["comments"])
+        self._push("好呀，先停在这里喵。" + chr(10) + summary)
+        return {"ok": True}
+
+    def _panel_jump(self, body: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            session = self._session
+            if not session or session.get("start_epoch") is None:
+                return {"ok": False, "error": "还没开始看喵"}
+            target = max(0.0, float(body.get("minute", 0)) * 60.0)
+            session["offset"] += target - self._current_position(session)
+        return {"ok": True, "position": int(target)}
+
+    def _panel_html(self) -> str:
+        page = Path(__file__).parent / "static" / "index.html"
+        try:
+            return page.read_text(encoding="utf-8")
+        except Exception:
+            return "<h1>面板页缺失喵（static/index.html）</h1>"
+
+    def _start_panel(self) -> None:
+        endpoints = {
+            ("GET", "/api/status"): self._panel_status,
+            ("POST", "/api/stop"): self._panel_stop,
+            ("POST", "/api/jump"): self._panel_jump,
+        }
+        port = find_open_port(self._panel_port)
+        server = PanelServer(port, self._panel_html, endpoints)
+        if server.start():
+            self._panel_server = server
+            self._panel_port = port
+            self.logger.info("[watch_party] 管理面板已启动: http://127.0.0.1:{}", port)
+            try:
+                registered = self.register_static_ui("static")
+                self.logger.info("[watch_party] static UI 注册: {}", registered)
+            except Exception as exc:
+                self.logger.warning("[watch_party] static UI 注册失败: {}", exc)
+        else:
+            self.logger.warning("[watch_party] 管理面板启动失败")
 
     # ── 功能入口 ───────────────────────────────────────────────
     async def _start(self, video_text: str) -> str:
