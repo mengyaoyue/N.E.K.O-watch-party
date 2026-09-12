@@ -31,6 +31,7 @@ from plugin.sdk.plugin import (
 )
 
 from ._panel import PanelServer, find_open_port
+from ._player_window import PlayerWindow
 from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window, subtitles_to_text
 from ._screen import capture_frame, capture_screen_text, ocr_frame, build_screen_context, extract_playback_time
 from ._watch_logic import (
@@ -209,6 +210,7 @@ class WatchPartyPlugin(NekoPluginBase):
         self._panel_server = None
         self._panel_port: int = 15690
         self._panel_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._pwindow: Optional[PlayerWindow] = None
         self._panel_loop_thread: Optional[threading.Thread] = None
 
     # ── 配置 ───────────────────────────────────────────────────
@@ -279,6 +281,8 @@ class WatchPartyPlugin(NekoPluginBase):
             self._panel_loop_thread.join(timeout=2.0)
         if self._panel_loop is not None:
             self._panel_loop.close()
+        if self._pwindow is not None:
+            self._pwindow.close()
         if self._panel_server:
             self._panel_server.stop()
         self._stop_event.set()
@@ -503,6 +507,18 @@ class WatchPartyPlugin(NekoPluginBase):
             fired_ids.add(reaction["at"])
             self._push(format_reaction(reaction, reaction["at"]))
 
+        # 同步播放窗口：直接读 video.currentTime（毫秒级真实进度，最高优先级）
+        if session.get("player_window") and self._pwindow is not None:
+            real = self._pwindow.position(timeout=3.0)
+            if real is not None:
+                if abs(real - position) >= 1.0:
+                    with self._lock:
+                        session["offset"] += real - position
+                position = real
+            elif self._pwindow.is_alive() is False:
+                session["player_window"] = False
+                self._push("同步播放窗口关掉了喵，回到手动校准模式（「跳到 X 分」还能用）")
+
         # 自发碎碎念：每 N 分钟结合台词/弹幕表达一次看法（不是干巴巴的进度条）
         if (
             self.heartbeat_minutes > 0
@@ -627,6 +643,8 @@ class WatchPartyPlugin(NekoPluginBase):
                 return {"ok": False, "error": "还没开始看喵"}
             target = max(0.0, float(body.get("minute", 0)) * 60.0)
             session["offset"] += target - self._current_position(session)
+            if self._pwindow is not None and self._pwindow.is_alive():
+                self._pwindow.seek(target)
         return {"ok": True, "position": int(target)}
 
     def _start_panel_loop(self) -> None:
@@ -676,6 +694,24 @@ class WatchPartyPlugin(NekoPluginBase):
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def _panel_open_player(self, _body: dict[str, Any]) -> dict[str, Any]:
+        session = self._session
+        bvid = str((session or {}).get("video", {}).get("bvid") or _body.get("bvid") or "").strip()
+        if not bvid:
+            return {"ok": False, "error": "还没有陪看的视频喵（先开始一次陪看）"}
+        if self._pwindow is None:
+            self._pwindow = PlayerWindow()
+        ok, msg = self._pwindow.open(bvid, timeout=45)
+        if ok and session is not None:
+            with self._lock:
+                session["player_window"] = True
+        return {"ok": ok, "message": msg, "error": None if ok else msg}
+
+    def _panel_close_player(self, _body: dict[str, Any]) -> dict[str, Any]:
+        if self._pwindow is not None:
+            self._pwindow.close()
+        return {"ok": True, "message": "同步播放窗口已关闭喵"}
+
     def _panel_html(self) -> str:
         page = Path(__file__).parent / "static" / "index.html"
         try:
@@ -693,6 +729,8 @@ class WatchPartyPlugin(NekoPluginBase):
             ("POST", "/api/config"): self._panel_config,
             ("POST", "/api/sessdata"): self._panel_save_sessdata,
             ("POST", "/api/comments"): self._panel_comments,
+            ("POST", "/api/open_player"): self._panel_open_player,
+            ("POST", "/api/close_player"): self._panel_close_player,
         }
         port = find_open_port(self._panel_port)
         server = PanelServer(port, self._panel_html, endpoints)

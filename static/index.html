@@ -55,6 +55,7 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
     <input type="number" id="minute" value="0" min="0"> 分钟
     <button onclick="jump()">跳到</button>
     <button class="danger" onclick="stop()">结束陪看</button>
+    <button onclick="openPlayer()">📺 打开同步播放窗口</button>
     <button onclick="loadStatus()">刷新</button>
     <span id="status"></span>
   </div>
@@ -121,6 +122,14 @@ async function loadStatus(){
     sd.className="toggle "+(d.sessdata_set?"on":"off");
     document.getElementById("status").textContent="已更新喵～";
   }catch(e){document.getElementById("status").textContent="加载失败："+e}
+}
+async function openPlayer(){
+  const res=document.getElementById("result");
+  res.textContent="打开同步播放窗口喵…";
+  try{
+    const d=await api("/api/open_player",{method:"POST",body:"{}"});
+    res.textContent=d.ok?("✅ "+d.message):("❌ "+d.error);
+  }catch(e){res.textContent="失败："+e}
 }
 async function saveRpm(){
   const rpm=parseFloat(document.getElementById("rpm").value)||3;
