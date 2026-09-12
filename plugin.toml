@@ -3,7 +3,7 @@ name = "陪看猫娘"
 description = "陪主人看B站视频喵：发链接或BV号，猫娘预习视频、读取全量弹幕和热评，按播放进度在对应时间点冒出来表达笑/感动/同情/震惊/吐槽等情绪，还能随时解读「刚才那段什么梗」，看完自动输出高能时刻与情绪总结。数据匿名读取公开接口，零第三方依赖，评论接口失败自动降级。"
 short_description = "Catgirl watches Bilibili videos with you: reads danmaku, reacts with emotions on timeline."
 keywords = ["陪看", "watch", "bilibili", "B站", "弹幕", "danmaku", "共情", "猫娘", "neko", "视频", "video"]
-version = "0.3.2"
+version = "0.3.3"
 type = "plugin"
 id = "neko_watch_party"
 entry = "plugin.plugins.neko_watch_party:WatchPartyPlugin"
@@ -32,7 +32,9 @@ reaction_count = 10
 # 预习完成后自动开始同步陪看（true=一步式；false=等用户说"开始看"）
 auto_begin = true
 # 陪看心跳：每 N 分钟轻推一句进度（0=关闭）
-heartbeat_minutes = 5
+heartbeat_minutes = 3
+# 反应密度随时长自适应（每 45 秒一个反应点，上限 60）
+auto_density = true
 # B站 SESSDATA（浏览器 F12 复制，填了可解锁字幕模式；留空用弹幕模式）
 bili_sessdata = ""
 # 截屏辅助：截取主屏画面做本地 OCR，让猫娘"看见"画面（默认关；隐私敏感请保持关闭）

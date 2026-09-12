@@ -27,6 +27,28 @@ EMOTIONS: dict[str, str] = {
 # 两条反应之间的最小间隔（秒）：不做话痨猫
 MIN_GAP_SECONDS = 15.0
 
+# 反应密度：默认每 45 秒一个反应点（长视频自动加密）
+SECONDS_PER_REACTION = 45
+MAX_REACTIONS = 60
+
+
+def effective_reaction_count(duration: int, configured: int) -> int:
+    """按视频时长算应有的反应数：至少 configured 条，每 45 秒一个，上限 60。"""
+    duration = max(0, int(duration))
+    by_density = duration // SECONDS_PER_REACTION
+    return max(int(configured), min(MAX_REACTIONS, by_density))
+
+
+# 碎碎念模板（结合上下文使用）
+_IDLE_TEMPLATES = (
+    "这段{topic}本喵看得挺投入的喵",
+    "UP的节奏拿捏得不错喵，这段没有快进",
+    "看到「{quote}」的时候本喵耳朵动了一下喵",
+    "弹幕都在刷「{quote}」，看来这段是名场面喵",
+    "本喵怀疑后面会有反转，先记下了喵",
+    "这BGM有点上头喵，本喵尾巴跟着晃了",
+)
+
 _BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
 _AV_RE = re.compile(r"(?:^|[^0-9A-Za-z])av(\d{1,15})(?:[^0-9]|$)", re.IGNORECASE)
 _PAGE_RE = re.compile(r"[?&]p=(\d{1,4})")
@@ -325,6 +347,33 @@ def format_reaction(reaction: dict[str, Any], position: float) -> str:
     emoji = EMOTIONS.get(reaction.get("emotion", ""), "🐱")
     minutes, seconds = divmod(int(position), 60)
     return f"{emoji} [{minutes:02d}:{seconds:02d}] {reaction.get('text', '')}"
+
+
+def spontaneous_remark(
+    subs: list[dict[str, Any]],
+    danmaku: list[dict[str, Any]],
+    position: float,
+    video_title: str = "",
+    seed: str = "",
+) -> str:
+    """结合当前位置的台词/弹幕生成一句自发看法（非脚本反应）。"""
+    import random as _random
+
+    rng = _random.Random(f"idle|{seed}|{int(position)}")
+    near_line = ""
+    near_subs = [s for s in subs if abs(s["t"] - position) <= 15]
+    if near_subs:
+        near_line = near_subs[len(near_subs) // 2]["text"][:30]
+    near_dm = [d["text"] for d in danmaku if abs(d["t"] - position) <= 20]
+    quote = near_dm[0][:22] if near_dm else ""
+    topic = video_title[:16] or "这个视频"
+    template = rng.choice(_IDLE_TEMPLATES)
+    remark = template.format(topic=topic, quote=quote or "名场面")
+    if quote and "{quote}" in template:
+        pass
+    elif near_line:
+        remark += f"（台词：{near_line}）"
+    return remark[:90]
 
 
 def build_summary(

@@ -184,6 +184,30 @@ def main():
     #     改为验证失败形态的返回结构
     bad = scr.capture_screen_text.__doc__ is not None
     assert bad, "应有文档"
+
+    # 10. v0.3.3 反应密度自适应 + 自发碎碎念
+    # 10.1 数量随时长：9.5 分钟视频 → 至少 12 条；30 分钟 → 40 条；配置高者生效
+    assert_eq(wl.effective_reaction_count(570, 10), 12, "9.5 分钟 → 12 条")
+    assert_eq(wl.effective_reaction_count(1800, 10), 40, "30 分钟 → 40 条")
+    assert_eq(wl.effective_reaction_count(60, 10), 10, "短视频用配置下限")
+    assert_eq(wl.effective_reaction_count(3600, 50), 60, "上限 60")
+    assert_eq(wl.effective_reaction_count(1800, 45), 45, "配置更高时用配置")
+
+    # 10.2 碎碎念：有弹幕引用弹幕，有台词引用台词，都无则用主题模板
+    subs = [{"t": 100, "dur": 2, "text": "这句话很重要"}]
+    dm = [{"t": 105, "text": "前方高能"}, {"t": 108, "text": "名场面"}]
+    r1 = wl.spontaneous_remark(subs, dm, 102, "测试视频", seed="a")
+    assert ("弹幕" in r1 or "台词" in r1 or "名场面" in r1), f"应结合上下文: {r1!r}"
+    r_none = wl.spontaneous_remark([], [], 500, "我的视频", seed="b")
+    assert "我的视频" in r_none or "这个视频" in r_none, f"无上下文应回退模板: {r_none!r}"
+    # 同 seed 同位置确定性
+    assert_eq(wl.spontaneous_remark(subs, dm, 102, "t", seed="k"),
+              wl.spontaneous_remark(subs, dm, 102, "t", seed="k"), "碎碎念应确定")
+
+    # 10.3 源码级断言：预习用自适应数量、心跳升级为碎碎念
+    src_init = (ROOT / "__init__.py").read_text(encoding="utf-8")
+    assert "effective_reaction_count" in src_init and "auto_density" in src_init
+    assert "spontaneous_remark" in src_init and "recent_fired" in src_init
     print("全部测试通过 ✅")
 
 

@@ -41,7 +41,8 @@ from ._watch_logic import (
     parse_danmaku_xml,
     parse_video_id,
     sample_danmaku,
-)
+    effective_reaction_count,
+    spontaneous_remark,)
 
 _PLUGIN_ID = "neko_watch_party"
 
@@ -245,8 +246,10 @@ class WatchPartyPlugin(NekoPluginBase):
         self.poll_interval = max(1.0, float(_safe_int(section.get("poll_interval"), 2)))
         self.auto_summary = bool(section.get("auto_summary", True))
         self.auto_begin = _safe_bool(section.get("auto_begin"), True)
+        self.auto_density = _safe_bool(section.get("auto_density"), True)
         self.heartbeat_minutes = max(0, _safe_int(section.get("heartbeat_minutes"), 5))
         self.bili_sessdata = _safe_str(section.get("bili_sessdata"))
+        self.auto_density = _safe_bool(section.get("auto_density"), True)
         self.screen_assist = _safe_bool(section.get("screen_assist"), False)
         self.screen_on_react = _safe_bool(section.get("screen_on_react"), True)
         self.catgirl_name = _safe_str(section.get("catgirl_name"), "猫娘") or "猫娘"
@@ -414,12 +417,15 @@ class WatchPartyPlugin(NekoPluginBase):
             subtitle_text, sampled, comments, self.reaction_count,
         )
         raw = await _call_llm("你是陪看猫娘的脚本引擎。", prompt, self.llm_timeout)
-        reactions = normalize_reactions(raw, video["duration"], self.reaction_count)
+        want = (effective_reaction_count(video["duration"], self.reaction_count)
+                if self.auto_density else self.reaction_count)
+        reactions = normalize_reactions(raw, video["duration"], want)
         if not reactions:
             reactions = self._fallback_reactions(video["duration"], danmaku)
             self.logger.warning("[watch_party] LLM 脚本不可用，降级弹幕高能点模式")
         self.logger.info(
-            "[watch_party] 预习⑤陪看脚本 {} 条（共 {:.1f}s）", len(reactions), time.time() - t0
+            "[watch_party] 预习⑤陪看脚本 {} 条（时长 {}s → 目标 {} 条，共 {:.1f}s）",
+            len(reactions), video["duration"], want, time.time() - t0,
         )
         return {
             "video": video,
@@ -489,21 +495,26 @@ class WatchPartyPlugin(NekoPluginBase):
             fired_ids.add(reaction["at"])
             self._push(format_reaction(reaction, reaction["at"]))
 
-        # 心跳：每 N 分钟轻推一句进度，让陪看"活着"也方便校准
+        # 自发碎碎念：每 N 分钟结合台词/弹幕表达一次看法（不是干巴巴的进度条）
         if (
             self.heartbeat_minutes > 0
             and time.time() - float(session.get("last_heartbeat", time.time())) >= self.heartbeat_minutes * 60
         ):
             session["last_heartbeat"] = time.time()
             minutes, seconds = divmod(int(position), 60)
-            near = subtitle_window(session.get("subtitles", []), position)
-            line = near[0]["text"][:26] if near else ""
-            tail = f"，刚说到「{line}」" if line else ""
-            if self.screen_assist and not line:
-                shot = capture_screen_text()
-                if shot["ok"] and shot["text"]:
-                    tail = f"，画面上有「{shot['text'][:30]}」"
-            self._push(f"⏱ 陪看中喵～放到 {minutes} 分{seconds:02d} 秒{tail}，要校准就说「跳到 X 分」")
+            recent_fired = [r for r in session["fired"] if abs(r["at"] - position) <= 45]
+            if not recent_fired:
+                remark = spontaneous_remark(
+                    session.get("subtitles", []), session.get("danmaku", []),
+                    position, video.get("title", ""), seed=f"{video.get('bvid')}|{int(position)}",
+                )
+                if self.screen_assist:
+                    shot = capture_screen_text()
+                    if shot["ok"] and shot["text"]:
+                        remark += f"（瞄到你画面上有「{shot['text'][:26]}」喵）"
+                self._push(f"💬 {minutes}分{seconds:02d}：{remark}")
+            else:
+                self._push(f"⏱ 陪看中喵～放到 {minutes} 分{seconds:02d} 秒，要校准就说「跳到 X 分」")
 
         # 播完自动总结
         if (
