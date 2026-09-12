@@ -247,7 +247,6 @@ def build_script_prompt_v2(
             "反应的 at 应贴合其评点的台词时间点；text 可以直接引用正在说的内容再吐槽/感动。"
             "\n台词时间轴节选：\n" + subtitle_text[:3000]
         )
-        )
     return base + extra
 
 
