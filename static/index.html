@@ -34,6 +34,7 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
     <input type="text" id="video" placeholder="粘贴B站链接或BV号，如 BV1xx411c7mD" style="width:calc(100% - 130px);background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:8px 12px;font-size:14px">
     <button onclick="startWatch()">开始陪看</button>
     <button onclick="reactNow()">刚才那段</button>
+    <button onclick="readComments()">看评论区</button>
     <div id="result" class="sub" style="margin-top:10px;white-space:pre-wrap"></div>
     <div class="sub">⚠ 若这里点了没反应，直接在聊天框发「陪我看 &lt;链接&gt;」最稳喵。首次预习约 30 秒（抓弹幕+生成脚本），建议等猫娘回复"已开陪"后再开始看视频，否则会不同步。</div>
   </div>
@@ -81,6 +82,14 @@ async function startWatch(){
     const d=await api("/api/start",{method:"POST",body:JSON.stringify({video})});
     res.textContent=d.ok?("✅ "+d.message):("❌ "+d.error);
     await loadStatus();
+  }catch(e){res.textContent="失败："+e}
+}
+async function readComments(){
+  const res=document.getElementById("result");
+  res.textContent="翻评论区喵…";
+  try{
+    const d=await api("/api/comments",{method:"POST",body:"{}"});
+    res.textContent=d.ok?d.message:("❌ "+d.error);
   }catch(e){res.textContent="失败："+e}
 }
 async function reactNow(){

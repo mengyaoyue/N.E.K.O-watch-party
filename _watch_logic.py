@@ -221,6 +221,7 @@ UP主：{up_name}
 - text 是猫娘口吻的一句话（不超过 {_MAX_TEXT_CHARS} 字，句尾可带"喵"），要针对视频内容本身，不要泛泛而谈
 - quote 可选，写触发你反应的那条弹幕/评论原文
 - 视频开头（前 10 秒）放一条打招呼式的反应也可以
+- 热评里特别戳的（点赞高的），可以安排 1~2 条"评论区反应"：text 引用热评原文再吐槽（如"热评说「xxx」，笑死本喵了"）
 """
 
 
@@ -387,25 +388,55 @@ def spontaneous_remark(
     position: float,
     video_title: str = "",
     seed: str = "",
+    comments: Optional[list[dict[str, Any]]] = None,
+    rotate: int = 0,
 ) -> str:
-    """结合当前位置的台词/弹幕生成一句自发看法（非脚本反应）。"""
+    """结合当前位置的台词/弹幕/热评生成一句自发看法（非脚本反应）。
+
+    ``rotate`` 让来源轮换（弹幕→台词→评论→弹幕…），避免每次都引同一种素材。
+    """
     import random as _random
 
     rng = _random.Random(f"idle|{seed}|{int(position)}")
-    near_line = ""
+    sources: list[tuple[str, str]] = []  # (素材种类, 内容)
+    near_dm = [d["text"] for d in danmaku if abs(d["t"] - position) <= 20]
+    if near_dm:
+        sources.append(("弹幕", near_dm[0][:22]))
     near_subs = [s for s in subs if abs(s["t"] - position) <= 15]
     if near_subs:
-        near_line = near_subs[len(near_subs) // 2]["text"][:30]
-    near_dm = [d["text"] for d in danmaku if abs(d["t"] - position) <= 20]
-    quote = near_dm[0][:22] if near_dm else ""
-    topic = video_title[:16] or "这个视频"
-    template = rng.choice(_IDLE_TEMPLATES)
-    remark = template.format(topic=topic, quote=quote or "名场面")
-    if quote and "{quote}" in template:
-        pass
-    elif near_line:
-        remark += f"（台词：{near_line}）"
-    return remark[:90]
+        sources.append(("台词", near_subs[len(near_subs) // 2]["text"][:30]))
+    for c in (comments or [])[:5]:
+        sources.append(("热评", str(c.get("text") or "")[:26]))
+    if not sources:
+        topic = video_title[:16] or "这个视频"
+        template = rng.choice(_IDLE_TEMPLATES)
+        return template.format(topic=topic, quote="名场面")[:90]
+    kind, quote = sources[(int(rotate) + int(rng.randrange(3))) % len(sources)]
+    if kind == "弹幕":
+        return f"弹幕都在刷「{quote}」，看来这段是名场面喵"[:90]
+    if kind == "台词":
+        return f"台词正说到「{quote}」，本喵听得很认真喵"[:90]
+    return f"有条热评说「{quote}」，挺戳本喵的喵"[:90]
+
+
+def format_comments(comments: list[dict[str, Any]], top: int = 5) -> str:
+    """把评论区渲染成猫娘点评（按点赞排序取 top N）。"""
+    if not comments:
+        return "这个视频还没有评论喵～"
+    sorted_c = sorted(comments, key=lambda c: int(c.get("like", 0) or 0), reverse=True)
+    lines = ["💬 评论区精选："]
+    medals = ["🥇", "🥈", "🥉"]
+    for i, c in enumerate(sorted_c[:top]):
+        medal = medals[i] if i < len(medals) else f"{i + 1}."
+        like = int(c.get("like", 0) or 0)
+        user = str(c.get("user") or "匿名")[:12]
+        text = str(c.get("text") or "").replace(chr(10), " ")[:60]
+        lines.append(f"{medal} [{user}·👍{like}] {text}")
+    best = sorted_c[0]
+    lines.append(
+        f"本喵觉得「{str(best.get('text') or '')[:40]}」这条最说到点子上了喵"
+    )
+    return chr(10).join(lines)
 
 
 def build_summary(

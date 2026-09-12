@@ -354,8 +354,8 @@ class WatchPartyPlugin(NekoPluginBase):
                 self.logger.warning("[watch_party] 页面通道弹幕异常: {}", exc)
         return []
 
-    async def _fetch_comments(self, aid: int) -> list[str]:
-        """热评抓取（可降级）：失败返回空列表。"""
+    async def _fetch_comments(self, aid: int) -> list[dict[str, Any]]:
+        """热评抓取（可降级）：返回 [{user, like, text}]，失败返回空列表。"""
         url = f"https://api.bilibili.com/x/v2/reply/main?type=1&oid={aid}&mode=3"
         try:
             data = await asyncio.to_thread(_http_get_json, url, "", self.request_timeout)
@@ -364,13 +364,17 @@ class WatchPartyPlugin(NekoPluginBase):
         if not data or data.get("code") != 0:
             return []
         replies = (data.get("data") or {}).get("replies") or []
-        texts: list[str] = []
-        for reply in replies[:10]:
-            if isinstance(reply, dict):
-                msg = _safe_str((reply.get("content") or {}).get("message"))
-                if msg:
-                    texts.append(msg)
-        return texts
+        out: list[dict[str, Any]] = []
+        for reply in replies[:20]:
+            if not isinstance(reply, dict):
+                continue
+            msg = _safe_str((reply.get("content") or {}).get("message"))
+            if not msg:
+                continue
+            like = int(reply.get("like") or 0)
+            user = _safe_str((reply.get("member") or {}).get("uname"), "匿名")
+            out.append({"user": user, "like": like, "text": msg})
+        return out
 
     # ── 陪看脚本生成 ───────────────────────────────────────────
     async def _prepare_session(self, video_text: str) -> dict[str, Any]:
@@ -407,6 +411,7 @@ class WatchPartyPlugin(NekoPluginBase):
 
         comments = await self._fetch_comments(video["aid"]) if video.get("aid") else []
         self.logger.info("[watch_party] 预习④热评 {} 条", len(comments))
+        comment_texts = [c["text"] for c in comments]
 
         subtitle_text = subtitles_to_text(subtitles)
         sampled = sample_danmaku(danmaku)
@@ -415,7 +420,7 @@ class WatchPartyPlugin(NekoPluginBase):
         gap = gap_for_rpm(rpm)
         prompt = build_script_prompt_v2(
             video["title"], video["desc"], video["up"], video["duration"],
-            subtitle_text, sampled, comments, want, min_gap=gap,
+            subtitle_text, sampled, comment_texts, want, min_gap=gap,
         )
         raw = await _call_llm("你是陪看猫娘的脚本引擎。", prompt, self.llm_timeout)
         reactions = normalize_reactions(raw, video["duration"], want, min_gap=gap)
@@ -506,7 +511,10 @@ class WatchPartyPlugin(NekoPluginBase):
                 remark = spontaneous_remark(
                     session.get("subtitles", []), session.get("danmaku", []),
                     position, video.get("title", ""), seed=f"{video.get('bvid')}|{int(position)}",
+                    comments=session.get("comments") or [],
+                    rotate=int(session.get("rotate", 0)),
                 )
+                session["rotate"] = int(session.get("rotate", 0)) + 1
                 if self.screen_assist:
                     shot = capture_screen_text()
                     if shot["ok"] and shot["text"]:
@@ -522,7 +530,7 @@ class WatchPartyPlugin(NekoPluginBase):
             and position >= video["duration"] + 15
         ):
             session["summarized"] = True
-            summary = build_summary(video, session["danmaku"], session["fired"], session["comments"])
+            summary = build_summary(video, session["danmaku"], session["fired"], [c["text"] for c in session["comments"]])
             self._push(summary)
             self.logger.info("[watch_party] 播放完毕，自动总结已推送")
 
@@ -564,7 +572,7 @@ class WatchPartyPlugin(NekoPluginBase):
             self._session = None
         if not session:
             return {"ok": True, "message": "本来就没在看喵"}
-        summary = build_summary(session["video"], session["danmaku"], session["fired"], session["comments"])
+        summary = build_summary(session["video"], session["danmaku"], session["fired"], [c["text"] for c in session["comments"]])
         self._push("好呀，先停在这里喵。" + chr(10) + summary)
         return {"ok": True}
 
@@ -650,6 +658,13 @@ class WatchPartyPlugin(NekoPluginBase):
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    def _panel_comments(self, _body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            text = self._run_async(self._read_comments(), timeout=45)
+            return {"ok": True, "message": text}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _panel_html(self) -> str:
         page = Path(__file__).parent / "static" / "index.html"
         try:
@@ -666,6 +681,7 @@ class WatchPartyPlugin(NekoPluginBase):
             ("POST", "/api/react"): self._panel_react,
             ("POST", "/api/config"): self._panel_config,
             ("POST", "/api/sessdata"): self._panel_save_sessdata,
+            ("POST", "/api/comments"): self._panel_comments,
         }
         port = find_open_port(self._panel_port)
         server = PanelServer(port, self._panel_html, endpoints)
@@ -711,6 +727,22 @@ class WatchPartyPlugin(NekoPluginBase):
             session["offset"] += target - self._current_position(session)
         return f"好喵，本喵把进度条拽到 {int(minute)} 分了，跟上了！"
 
+    async def _read_comments(self) -> str:
+        await self._ensure_config_loaded()
+        session = self._session
+        if not session:
+            raise SdkError("还没有陪看中的视频喵，先发链接开始陪看。")
+        aid = int(session["video"].get("aid") or 0)
+        comments = session.get("comments") or []
+        if not comments and aid:
+            comments = await self._fetch_comments(aid)
+            session["comments"] = comments
+        from ._watch_logic import format_comments
+
+        text = format_comments(comments, top=5)
+        self._push(text)
+        return text
+
     async def _react_now(self) -> str:
         with self._lock:
             session = self._session
@@ -752,7 +784,7 @@ class WatchPartyPlugin(NekoPluginBase):
             self._session = None
         if not session:
             return "本来就没在看喵～"
-        summary = build_summary(session["video"], session["danmaku"], session["fired"], session["comments"])
+        summary = build_summary(session["video"], session["danmaku"], session["fired"], [c["text"] for c in session["comments"]])
         return f"好呀，先停在这里喵。\n{summary}"
 
     @llm_tool(
@@ -854,6 +886,28 @@ class WatchPartyPlugin(NekoPluginBase):
             return Ok(await self._stop())
         except SdkError as exc:
             return Err(exc)
+
+    @llm_tool(
+        name="neko_watch_party_comments",
+        description="让猫娘读当前陪看视频的评论区：热评排序展示并点评最戳的一条，同时推送到聊天。",
+        parameters={"type": "object", "properties": {}},
+        timeout=30.0,
+    )
+    @plugin_entry(
+        id="read_comments",
+        name="看评论区",
+        description="读取当前陪看视频的热评并点评（需已开始陪看）。",
+        input_schema={"type": "object", "properties": {}},
+    )
+    async def read_comments_entry(self, **_):
+        await self._ensure_config_loaded()
+        try:
+            return Ok(await self._read_comments())
+        except SdkError as exc:
+            return Err(exc)
+        except Exception as exc:
+            self.logger.exception("读评论区失败: {}", exc)
+            return Err(SdkError(f"评论区读不出来喵：{exc}"))
 
     @plugin_entry(
         id="status",
