@@ -230,7 +230,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self._tick_thread: Optional[threading.Thread] = None
         self._panel_server = None
         self._panel_port: int = 15690
-        self._loop = None
+        self._panel_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._panel_loop_thread: Optional[threading.Thread] = None
 
     # ── 配置 ───────────────────────────────────────────────────
     async def _load_config(self) -> None:
@@ -271,7 +272,7 @@ class WatchPartyPlugin(NekoPluginBase):
             target=self._tick_loop, daemon=True, name="neko-watch-party-tick"
         )
         self._tick_thread.start()
-        self._loop = asyncio.get_running_loop()
+        self._start_panel_loop()
         try:
             state_path = Path(self.data_path()) / "panel_state.json"
             saved = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
@@ -286,6 +287,12 @@ class WatchPartyPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     def shutdown(self, **_):
+        if self._panel_loop is not None and self._panel_loop.is_running():
+            self._panel_loop.call_soon_threadsafe(self._panel_loop.stop)
+        if self._panel_loop_thread and self._panel_loop_thread.is_alive():
+            self._panel_loop_thread.join(timeout=2.0)
+        if self._panel_loop is not None:
+            self._panel_loop.close()
         if self._panel_server:
             self._panel_server.stop()
         self._stop_event.set()
@@ -600,12 +607,26 @@ class WatchPartyPlugin(NekoPluginBase):
             session["offset"] += target - self._current_position(session)
         return {"ok": True, "position": int(target)}
 
-    def _run_async(self, coro, timeout: float):
-        if self._loop is None or self._loop.is_closed():
-            raise RuntimeError("事件循环不可用喵")
-        import concurrent.futures as _cf
+    def _start_panel_loop(self) -> None:
+        """面板专用的常驻事件循环（独立线程）。
 
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        宿主对插件入口是"每次触发临时开循环"的模式，startup 里捕获的循环用完即关；
+        面板线程要跑异步入口必须有自己的常驻循环。
+        """
+        self._panel_loop = asyncio.new_event_loop()
+        self._panel_loop_thread = threading.Thread(
+            target=self._run_panel_loop, daemon=True, name="neko-watch-panel-loop"
+        )
+        self._panel_loop_thread.start()
+
+    def _run_panel_loop(self) -> None:
+        asyncio.set_event_loop(self._panel_loop)
+        self._panel_loop.run_forever()
+
+    def _run_async(self, coro, timeout: float):
+        if self._panel_loop is None or self._panel_loop.is_closed():
+            raise RuntimeError("面板事件循环不可用喵")
+        future = asyncio.run_coroutine_threadsafe(coro, self._panel_loop)
         return future.result(timeout=timeout)
 
     def _panel_start_watch(self, body: dict[str, Any]) -> dict[str, Any]:
