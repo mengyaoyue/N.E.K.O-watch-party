@@ -233,8 +233,7 @@ def main():
     assert got and got["position"] == 83 and got["total"] == 570, f"成对时间: {got!r}"
 
     items_single = [{"text": "12:34", "x": 600, "y": 950}]
-    got = scr.extract_playback_time(items_single, screen_h=1000)
-    assert got and got["position"] == 754, f"单时间: {got!r}"
+    assert scr.extract_playback_time(items_single, screen_h=1000) is None, "单时间不得当进度（防时钟误判）"
 
     # 顶部的时间（如标题里的 04:44）不应被当成进度
     items_top = [{"text": "04:44 预告", "x": 300, "y": 60}]
