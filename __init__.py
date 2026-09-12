@@ -63,6 +63,15 @@ def _safe_bool(value: Any, default: bool) -> bool:
             return False
     return default
 
+_LAST_BILI_CALL = [0.0]
+
+def _bili_throttle(min_gap: float = 1.2) -> None:
+    import time as _t
+    gap = _t.time() - _LAST_BILI_CALL[0]
+    if gap < min_gap:
+        _t.sleep(min_gap - gap)
+    _LAST_BILI_CALL[0] = _t.time()
+
 def _safe_str(value: Any, default: str = "") -> str:
     if value is None:
         return default
@@ -99,6 +108,7 @@ def _http_get(url: str, cookie: str = "", timeout: float = 15.0) -> tuple[int, b
 
 
 def _http_get_json(url: str, cookie: str = "", timeout: float = 15.0) -> Optional[dict[str, Any]]:
+    _bili_throttle()
     status, body = _http_get(url, cookie, timeout)
     if status != 200 or not body:
         return None
@@ -296,7 +306,10 @@ class WatchPartyPlugin(NekoPluginBase):
         data = await asyncio.to_thread(_http_get_json, url, cookie, self.request_timeout)
         if not data or data.get("code") != 0:
             code = (data or {}).get("code")
-            raise SdkError(f"呜…视频信息没拿到喵（接口码 {code}）。检查链接对不对，或稍后再试。")
+            raise SdkError(
+                f"呜…视频信息没拿到喵（接口码 {code}）。"
+                "如果反复出现，多半是B站对本机临时风控（请求太频繁），歇几分钟再试就好。"
+            )
         v = data.get("data") or {}
         page = max(1, _safe_int(video_id.get("page"), 1))
         pages = v.get("pages") or []
@@ -668,12 +681,15 @@ class WatchPartyPlugin(NekoPluginBase):
         await self._ensure_config_loaded()
         if not _safe_str(video):
             return Err(SdkError("要发我视频链接或BV号喵，比如 BV1xx411c7mD。"))
+        self.logger.info("[watch_party] start_watch 触发：video={!r} begin_now={}", video, begin_now)
         try:
             intro = await self._start(video)
             if begin_now:
                 intro = f"{intro}\n{await self._begin()}"
+            self.logger.info("[watch_party] start_watch 完成，会话就绪")
             return Ok(intro)
         except SdkError as exc:
+            self.logger.warning("[watch_party] start_watch 失败: {}", exc)
             return Err(exc)
         except Exception as exc:
             self.logger.exception("预习失败: {}", exc)
