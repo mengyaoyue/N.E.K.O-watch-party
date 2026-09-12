@@ -163,8 +163,10 @@ def main():
     # 8.5 build_script_prompt_v2：字幕优先指令
     spec_wp = _ilu2.spec_from_file_location("wp_init", ROOT / "__init__.py")
     # __init__.py 依赖 SDK 无法独立加载——改为源码级断言
+    p_v2 = mod.build_script_prompt_v2("标题", "简介", "UP", 300, "[00:12] 台词", [], [], 8, min_gap=20)
+    assert "台词时间轴" in p_v2 and "[00:12] 台词" in p_v2, "v2 提示词应注入字幕时间轴"
+    assert "至少间隔 20 秒" in p_v2, "v2 应透传 min_gap"
     src_init = (ROOT / "__init__.py").read_text(encoding="utf-8")
-    assert "build_script_prompt_v2" in src_init and "台词时间轴" in src_init, "应有字幕感知提示词"
     assert "auto_begin" in src_init and "heartbeat_minutes" in src_init, "应有一步式与心跳配置"
 
     # 9. v0.3.0 截屏辅助：纯逻辑部分（真实截屏需 dxcam，本地用 mock 验证决策）
