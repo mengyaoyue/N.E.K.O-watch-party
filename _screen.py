@@ -93,8 +93,10 @@ def extract_playback_time(ocr_items: list[dict[str, Any]], screen_h: int) -> Opt
             continue
         pos = _to_seconds(m.group(1))
         total = _to_seconds(m.group(2))
-        if pos is None or total is None or total == 0 or pos > total:
+        if pos is None or total is None or total == 0:
             continue
+        if pos > total:
+            pos, total = total, pos  # 顺序颠倒自动纠正
         return {"position": pos, "total": total}
     return None
 
