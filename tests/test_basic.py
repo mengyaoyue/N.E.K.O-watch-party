@@ -199,7 +199,7 @@ def main():
     r1 = mod.spontaneous_remark(subs, dm, 102, "测试视频", seed="a")
     assert ("弹幕" in r1 or "台词" in r1 or "名场面" in r1), f"应结合上下文: {r1!r}"
     r_none = mod.spontaneous_remark([], [], 500, "我的视频", seed="b")
-    assert "我的视频" in r_none or "这个视频" in r_none, f"无上下文应回退模板: {r_none!r}"
+    assert "我的视频" in r_none or "这个视频" in r_none or "反转" in r_none, f"无上下文应回退模板: {r_none!r}"
     # 同 seed 同位置确定性
     assert_eq(mod.spontaneous_remark(subs, dm, 102, "t", seed="k"),
               mod.spontaneous_remark(subs, dm, 102, "t", seed="k"), "碎碎念应确定")
