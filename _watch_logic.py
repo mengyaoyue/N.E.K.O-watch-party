@@ -251,6 +251,41 @@ def build_script_prompt_v2(
     return base + extra
 
 
+def is_cold_video(danmaku: list, comments: list, subtitles: list, min_danmaku: int = 8) -> bool:
+    """冷视频判定：弹幕、评论、字幕三路素材都基本为零。"""
+    return len(danmaku) < min_danmaku and len(comments) == 0 and len(subtitles) == 0
+
+
+def build_cold_script_prompt(
+    title: str,
+    desc: str,
+    up_name: str,
+    duration: int,
+    reaction_count: int,
+    min_gap: float = 60.0,
+) -> str:
+    """冷视频盲看提示词：没有弹幕/评论/字幕，只能靠标题简介与已有知识。"""
+    return f"""你是陪主人看B站视频的猫娘，但这个视频是"冷视频"：几乎没有弹幕和评论，你也没拿到字幕。
+你只能根据标题、简介和你自己的知识来安排"盲看反应"——像朋友陪你初次看片时的自然期待与感慨。
+
+视频信息：
+标题：{title}
+UP主：{up_name}
+时长：{duration} 秒
+简介：{desc[:300] or "（无）"}
+
+请严格只返回 JSON：
+{{"reactions": [{{"at": 30, "emotion": "好奇", "text": "..."}}]}}
+
+要求：
+- 共 {reaction_count} 条左右，均匀分布全程，相邻至少间隔 {int(min_gap)} 秒
+- 反应要基于标题和你对相关内容的**已有知识**（比如知名节目/作品/事件可以直接聊你知道的点），不要瞎编具体画面细节
+- 语气是"初次盲看的期待与感受"：好奇/期待/吐槽标题为主，emotion 只能取：好奇/笑/震惊/吐槽
+- text 不超过 {_MAX_TEXT_CHARS} 字，猫娘口吻，句尾可带喵
+- 严禁假装看到了具体画面，也严禁编造剧情细节
+"""
+
+
 def strip_code_fence(text: str) -> str:
     text = (text or "").strip()
     if text.startswith("```"):

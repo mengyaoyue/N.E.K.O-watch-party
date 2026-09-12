@@ -211,6 +211,17 @@ def main():
     src_init = (ROOT / "__init__.py").read_text(encoding="utf-8")
     assert "effective_reaction_count" in src_init and "auto_density" in src_init
     assert "spontaneous_remark" in src_init and "recent_fired" in src_init
+
+    # 12. v0.3.6 冷视频盲看模式
+    assert "is_cold_video" in src_init and "build_cold_script_prompt" in src_init, "应有冷视频盲看"
+    assert "盲看" in src_init, "应有盲看提示"
+    p_cold = mod.build_cold_script_prompt("厨房噩梦 殡仪馆餐厅", "戈登拉姆齐探店", "某UP", 600, 6, 60)
+    assert "冷视频" in p_cold and "已有知识" in p_cold and "600 秒" in p_cold, f"冷提示词: {p_cold[:200]!r}"
+    assert "严禁假装看到了具体画面" in p_cold, "应禁止编造画面细节"
+    # 冷判定
+    assert_eq(mod.is_cold_video([], [], []), True, "全空为冷")
+    assert_eq(mod.is_cold_video([{"t": 1, "text": "x"}] * 20, [], []), False, "有弹幕不算冷")
+    assert_eq(mod.is_cold_video([], [{"user": "a", "like": 1, "text": "x"}], []), False, "有评论不算冷")
     print("全部测试通过 ✅")
 
 

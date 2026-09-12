@@ -704,6 +704,11 @@ class WatchPartyPlugin(NekoPluginBase):
             self._session = session
         video = session["video"]
         intro = format_video_intro(video, len(session["danmaku"]), len(session["comments"]), self.catgirl_name)
+        if session.get("cold"):
+            tip = "这个视频弹幕评论都很少喵，本喵只能靠标题「盲看」。"
+            if not self.screen_assist:
+                tip += "建议开启截屏辅助（配置 screen_assist=true），本喵就能看着画面陪你看了喵！"
+            intro += f"\nℹ️ {tip}"
         if session["reactions"]:
             preview = session["reactions"][0]
             intro += f"\n（预习到 {len(session['reactions'])} 个想跟你吐槽的点，第一个在 {preview['at'] // 60}分{preview['at'] % 60:02d}秒喵）"
