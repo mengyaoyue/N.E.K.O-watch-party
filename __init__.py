@@ -33,7 +33,8 @@ from plugin.sdk.plugin import (
 from ._panel import PanelServer, find_open_port
 from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window, subtitles_to_text
 from ._screen import capture_screen_text, build_screen_context
-from ._watch_logic import (
+from ._watch_logic import (    build_script_prompt_v2,
+
     build_summary,
     format_reaction,
     format_video_intro,
@@ -172,32 +173,6 @@ async def _call_llm(system: str, user: str, timeout: float) -> str:
 
 
 @neko_plugin
-def build_script_prompt_v2(
-    title: str,
-    desc: str,
-    up_name: str,
-    duration: int,
-    subtitle_text: str,
-    sampled_danmaku: list[dict[str, Any]],
-    comments: list[str],
-    reaction_count: int,
-) -> str:
-    """字幕优先的陪看脚本提示词：有字幕时反应挂在台词时间轴上。"""
-    from ._watch_logic import build_script_prompt
-
-    base = build_script_prompt(
-        title, desc, up_name, duration, sampled_danmaku, comments, reaction_count,
-    )
-    extra = ""
-    if subtitle_text:
-        extra = (
-            "\n\n【重要】本视频带时间轴台词（字幕）。请以台词内容为主来安排反应："
-            "反应的 at 应贴合其评点的台词时间点；text 可以直接引用正在说的内容再吐槽/感动。"
-            "\n台词时间轴节选：\n" + subtitle_text[:3000]
-        )
-    return base + extra
-
-
 
 
 class WatchPartyPlugin(NekoPluginBase):

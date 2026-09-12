@@ -224,6 +224,33 @@ UP主：{up_name}
 """
 
 
+def build_script_prompt_v2(
+    title: str,
+    desc: str,
+    up_name: str,
+    duration: int,
+    subtitle_text: str,
+    sampled_danmaku: list[dict[str, Any]],
+    comments: list[str],
+    reaction_count: int,
+    min_gap: float = MIN_GAP_SECONDS,
+) -> str:
+    """字幕优先的陪看脚本提示词：有字幕时反应挂在台词时间轴上。"""
+    base = build_script_prompt(
+        title, desc, up_name, duration, sampled_danmaku, comments,
+        reaction_count, min_gap=min_gap,
+    )
+    extra = ""
+    if subtitle_text:
+        extra = (
+            "\n\n【重要】本视频带时间轴台词（字幕）。请以台词内容为主来安排反应："
+            "反应的 at 应贴合其评点的台词时间点；text 可以直接引用正在说的内容再吐槽/感动。"
+            "\n台词时间轴节选：\n" + subtitle_text[:3000]
+        )
+        )
+    return base + extra
+
+
 def strip_code_fence(text: str) -> str:
     text = (text or "").strip()
     if text.startswith("```"):
