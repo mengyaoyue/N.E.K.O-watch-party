@@ -235,6 +235,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self.screen_assist = _safe_bool(section.get("screen_assist"), False)
         self.screen_on_react = _safe_bool(section.get("screen_on_react"), True)
         self.auto_align = _safe_bool(section.get("auto_align"), True)
+        self.reaction_lead_seconds = max(0.0, float(_safe_int(section.get("reaction_lead_seconds"), 4)))
+        self.reaction_lead_seconds: float = 4.0
         self.catgirl_name = _safe_str(section.get("catgirl_name"), "猫娘") or "猫娘"
         self.master_name = _safe_str(section.get("master_name"), "主人") or "主人"
         self._config_loaded = True
@@ -500,12 +502,27 @@ class WatchPartyPlugin(NekoPluginBase):
         video = session["video"]
         fired_ids = {r["at"] for r in session["fired"]}
 
+        # 提前量：推送到聊天后猫娘开口需要几秒，提前触发刚好卡在画面节点上
+        lead = self.reaction_lead_seconds
         for reaction in session["reactions"]:
-            if reaction["at"] in fired_ids or reaction["at"] > position:
+            if reaction["at"] in fired_ids or reaction["at"] > position + lead:
                 continue
             session["fired"].append(reaction)
             fired_ids.add(reaction["at"])
-            self._push(format_reaction(reaction, reaction["at"]))
+            text = format_reaction(reaction, reaction["at"])
+            # 截屏辅助开启时：以实时画面为主参考（OCR 本地推理），脚本情绪做辅助
+            if self.screen_assist and self.screen_on_react:
+                try:
+                    shot = capture_screen_text()
+                except Exception:
+                    shot = {"ok": False, "text": ""}
+                if shot.get("ok") and shot.get("text"):
+                    emoji = {"笑": "😂", "感动": "🥹", "同情": "🫂", "震惊": "😱", "吐槽": "😤",
+                             "好奇": "🤔", "心疼": "🥺", "燃": "🔥"}.get(reaction.get("emotion", ""), "🐱")
+                    minutes, seconds = divmod(int(reaction["at"]), 60)
+                    screen_text = shot["text"][:46]
+                    text = f"{emoji} [{minutes:02d}:{seconds:02d}] 画面上是「{screen_text}」，{reaction.get('text', '')[:24]}喵"
+            self._push(text)
 
         # 同步播放窗口：直接读 video.currentTime（毫秒级真实进度，最高优先级）
         if session.get("player_window") and self._pwindow is not None:

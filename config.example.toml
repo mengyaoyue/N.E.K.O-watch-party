@@ -22,6 +22,8 @@ screen_assist = false
 screen_on_react = true
 # 自动对齐：心跳时截屏读播放器进度条自动校准（需先开 screen_assist）
 auto_align = true
+# 反应提前量（秒）：推送后猫娘开口有几秒延迟，提前触发刚好卡在画面节点
+reaction_lead_seconds = 4
 request_timeout = 15
 llm_timeout = 45
 poll_interval = 2

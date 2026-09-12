@@ -247,6 +247,11 @@ def main():
     assert "def _auto_align" in src_init, "应有自动对齐实现"
     assert "extract_playback_time" in src_init and "auto_align" in src_init, "应对齐接线"
     assert "偏差" in src_init, "应对齐有保护阈值"
+
+    # 15. v0.4.2 反应提前量 + 截屏优先合成（源码断言）
+    assert "reaction_lead_seconds" in src_init, "应有反应提前量配置"
+    assert "position + lead" in src_init, "触发应带提前量"
+    assert "画面上是「" in src_init, "截屏开启时应以画面为主参考"
     print("全部测试通过 ✅")
 
 
