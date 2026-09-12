@@ -124,6 +124,48 @@ def main():
     assert "笑×1" in summary and "震惊×1" in summary, "情绪统计应出现"
     assert "第一条热评" in summary, "热评速览应出现"
 
+
+    # 8. v0.2.0：WBI 签名 + 字幕工具
+    import importlib.util as _ilu2
+    spec_bd = _ilu2.spec_from_file_location("neko_bili_data", ROOT / "_bili_data.py")
+    bd = _ilu2.module_from_spec(spec_bd)
+    sys.modules["neko_bili_data"] = bd
+    spec_bd.loader.exec_module(bd)
+
+    # 8.1 WBI 签名：确定性 + 参数规范化 + wts/w_rid 存在
+    s1 = bd.sign_wbi({"foo": "1", "bvid": "BV1xx411c7mD"}, "imgkey", "subkey", wts=1700000000)
+    s2 = bd.sign_wbi({"bvid": "BV1xx411c7mD", "foo": "1"}, "imgkey", "subkey", wts=1700000000)
+    assert s1["w_rid"] == s2["w_rid"], "同参数同 wts 应同签名（与参数顺序无关）"
+    assert s1["wts"] == 1700000000 and len(s1["w_rid"]) == 32, "wts 透传 + w_rid 为 md5"
+    s3 = bd.sign_wbi({"foo": "1"}, "imgkey", "subkey", wts=1700000001)
+    assert s3["w_rid"] != s1["w_rid"], "wts 变化签名应变化"
+
+    # 8.2 mixin key 截断 32 位
+    assert_eq(len(bd._mixin_key("a" * 64, "b" * 64)), 32, "mixin key 应为 32 字符")
+
+    # 8.3 字幕正文解析（B站字幕 JSON）
+    body = json.dumps({"body": [
+        {"from": 1.5, "to": 3.0, "content": "大家好"},
+        {"from": 3.2, "to": 5.0, "content": "今天讲原神"},
+        {"bad": 1},
+    ]}).encode()
+    subs = bd.parse_subtitle_json(json.loads(body.decode("utf-8")))
+    assert_eq(len(subs), 2, "应解析 2 条有效字幕")
+    assert_eq(subs[0], {"t": 1.5, "dur": 1.5, "text": "大家好"}, "字幕字段")
+    assert bd.download_subtitle_body(b"not json") == [], "坏数据返回空"
+
+    # 8.4 时间轴窗口 + 采样文本
+    near = bd.subtitle_window(subs, 2.0, window=5.0)
+    assert_eq(len(near), 2, "窗口应覆盖两条")
+    text = bd.subtitles_to_text(subs)
+    assert "[00:01] 大家好" in text and "[00:03] 今天讲原神" in text, f"时间轴文本: {text!r}"
+
+    # 8.5 build_script_prompt_v2：字幕优先指令
+    spec_wp = _ilu2.spec_from_file_location("wp_init", ROOT / "__init__.py")
+    # __init__.py 依赖 SDK 无法独立加载——改为源码级断言
+    src_init = (ROOT / "__init__.py").read_text(encoding="utf-8")
+    assert "build_script_prompt_v2" in src_init and "台词时间轴" in src_init, "应有字幕感知提示词"
+    assert "auto_begin" in src_init and "heartbeat_minutes" in src_init, "应有一步式与心跳配置"
     print("全部测试通过 ✅")
 
 

@@ -31,8 +31,9 @@ from plugin.sdk.plugin import (
 )
 
 from ._panel import PanelServer, find_open_port, _PAGE_CSS
+from ._bili_data import fetch_subtitles, subtitle_window
+from ._watch_logic import build_script_prompt as build_script_prompt_v2
 from ._watch_logic import (
-    build_script_prompt,
     build_summary,
     format_reaction,
     format_video_intro,
@@ -49,6 +50,17 @@ _USER_AGENT = (
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
 
+
+def _safe_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in {"1", "true", "yes", "on", "开"}:
+            return True
+        if low in {"0", "false", "no", "off", "关"}:
+            return False
+    return default
 
 def _safe_str(value: Any, default: str = "") -> str:
     if value is None:
@@ -148,6 +160,34 @@ async def _call_llm(system: str, user: str, timeout: float) -> str:
 
 
 @neko_plugin
+def build_script_prompt_v2(
+    title: str,
+    desc: str,
+    up_name: str,
+    duration: int,
+    subtitle_text: str,
+    sampled_danmaku: list[dict[str, Any]],
+    comments: list[str],
+    reaction_count: int,
+) -> str:
+    """字幕优先的陪看脚本提示词：有字幕时反应挂在台词时间轴上。"""
+    from ._watch_logic import build_script_prompt, MIN_GAP_SECONDS, _MAX_TEXT_CHARS
+
+    base = build_script_prompt(
+        title, desc, up_name, duration, sampled_danmaku, comments, reaction_count,
+    )
+    extra = ""
+    if subtitle_text:
+        extra = (
+            "\n\n【重要】本视频带时间轴台词（字幕）。请以台词内容为主来安排反应："
+            "反应的 at 应贴合其评点的台词时间点；text 可以直接引用正在说的内容再吐槽/感动。"
+            "\n台词时间轴节选：\n" + subtitle_text[:3000]
+        )
+    return base + extra
+
+
+
+
 class WatchPartyPlugin(NekoPluginBase):
     """陪看猫娘：读取视频内容与弹幕，按进度共情陪伴。"""
 
@@ -157,6 +197,9 @@ class WatchPartyPlugin(NekoPluginBase):
         self.logger = self.file_logger
 
         self.reaction_count: int = 10
+        self.auto_begin: bool = True
+        self.heartbeat_minutes: int = 5
+        self.bili_sessdata: str = ""
         self.request_timeout: float = 15.0
         self.llm_timeout: float = 45.0
         self.poll_interval: float = 2.0
@@ -188,6 +231,9 @@ class WatchPartyPlugin(NekoPluginBase):
         self.llm_timeout = max(10.0, float(_safe_int(section.get("llm_timeout"), 45)))
         self.poll_interval = max(1.0, float(_safe_int(section.get("poll_interval"), 2)))
         self.auto_summary = bool(section.get("auto_summary", True))
+        self.auto_begin = _safe_bool(section.get("auto_begin"), True)
+        self.heartbeat_minutes = max(0, _safe_int(section.get("heartbeat_minutes"), 5))
+        self.bili_sessdata = _safe_str(section.get("bili_sessdata"))
         self.catgirl_name = _safe_str(section.get("catgirl_name"), "猫娘") or "猫娘"
         self.master_name = _safe_str(section.get("master_name"), "主人") or "主人"
         self._config_loaded = True
@@ -300,30 +346,59 @@ class WatchPartyPlugin(NekoPluginBase):
             raise SdkError(
                 "没认出这是哪个视频喵…发我B站链接或 BV 号（如 BV1xx411c7mD）就好。"
             )
+        t0 = time.time()
         video = await self._fetch_video(video_id)
-        danmaku = await self._fetch_danmaku(video["cid"])
-        await asyncio.sleep(0.3)
-        comments = await self._fetch_comments(video["aid"]) if video.get("aid") else []
+        self.logger.info(
+            "[watch_party] 预习①视频信息 OK：bvid={} cid={} 时长={}s（{:.1f}s）",
+            video.get("bvid"), video.get("cid"), video.get("duration"), time.time() - t0,
+        )
 
+        danmaku = await self._fetch_danmaku(video["cid"])
+        self.logger.info("[watch_party] 预习②弹幕 {} 条", len(danmaku))
+        await asyncio.sleep(0.3)
+
+        # 字幕（时间轴台词）：配置了 SESSDATA 才拿得到；没有就跳过走弹幕模式
+        subtitles: list[dict[str, Any]] = []
+        cookie = ""
+        if self.bili_sessdata:
+            cookie = f"SESSDATA={self.bili_sessdata}"
+        if video.get("bvid") and video.get("cid"):
+            try:
+                subtitles = await asyncio.to_thread(
+                    fetch_subtitles, video["bvid"], video["cid"], cookie, self.request_timeout
+                )
+            except Exception as exc:
+                self.logger.warning("[watch_party] 字幕获取失败: {}", exc)
+        self.logger.info("[watch_party] 预习③字幕 {} 条（{}）", len(subtitles), "字幕模式" if subtitles else "弹幕模式")
+
+        comments = await self._fetch_comments(video["aid"]) if video.get("aid") else []
+        self.logger.info("[watch_party] 预习④热评 {} 条", len(comments))
+
+        subtitle_text = subtitles_to_text(subtitles)
         sampled = sample_danmaku(danmaku)
-        prompt = build_script_prompt(
+        prompt = build_script_prompt_v2(
             video["title"], video["desc"], video["up"], video["duration"],
-            sampled, comments, self.reaction_count,
+            subtitle_text, sampled, comments, self.reaction_count,
         )
         raw = await _call_llm("你是陪看猫娘的脚本引擎。", prompt, self.llm_timeout)
         reactions = normalize_reactions(raw, video["duration"], self.reaction_count)
         if not reactions:
-            # 模型没吐出可用脚本：降级为"高能点机械吐槽"，保证玩法不中断
             reactions = self._fallback_reactions(video["duration"], danmaku)
+            self.logger.warning("[watch_party] LLM 脚本不可用，降级弹幕高能点模式")
+        self.logger.info(
+            "[watch_party] 预习⑤陪看脚本 {} 条（共 {:.1f}s）", len(reactions), time.time() - t0
+        )
         return {
             "video": video,
             "danmaku": danmaku,
+            "subtitles": subtitles,
             "comments": comments,
             "reactions": reactions,
             "fired": [],
-            "start_epoch": None,
+            "start_epoch": time.time() if self.auto_begin else None,
             "offset": 0.0,
             "summarized": False,
+            "last_heartbeat": time.time(),
         }
 
     def _fallback_reactions(self, duration: int, danmaku: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -380,6 +455,18 @@ class WatchPartyPlugin(NekoPluginBase):
             session["fired"].append(reaction)
             fired_ids.add(reaction["at"])
             self._push(format_reaction(reaction, reaction["at"]))
+
+        # 心跳：每 N 分钟轻推一句进度，让陪看"活着"也方便校准
+        if (
+            self.heartbeat_minutes > 0
+            and time.time() - float(session.get("last_heartbeat", time.time())) >= self.heartbeat_minutes * 60
+        ):
+            session["last_heartbeat"] = time.time()
+            minutes, seconds = divmod(int(position), 60)
+            near = subtitle_window(session.get("subtitles", []), position)
+            line = near[0]["text"][:26] if near else ""
+            tail = f"，刚说到「{line}」" if line else ""
+            self._push(f"⏱ 陪看中喵～放到 {minutes} 分{seconds:02d} 秒{tail}，要校准就说「跳到 X 分」")
 
         # 播完自动总结
         if (
@@ -506,6 +593,11 @@ class WatchPartyPlugin(NekoPluginBase):
             window = [d for d in session["danmaku"] if abs(d["t"] - position) <= 15]
             fired_ids = {r["at"] for r in session["fired"]}
             upcoming = [r for r in session["reactions"] if r["at"] not in fired_ids and r["at"] >= position - 5]
+        subs = session.get("subtitles") or []
+        near_subs = subtitle_window(subs, position) if subs else []
+        if near_subs:
+            line = near_subs[len(near_subs) // 2]["text"]
+            return f"台词正说到「{line[:40]}」喵，本喵听得很认真！"
         if window:
             burst = random.choice(window)["text"]
             return f"{random.choice(('好奇', '吐槽'))} 咦，这附近弹幕都在说「{burst[:30]}」喵！"
@@ -530,7 +622,7 @@ class WatchPartyPlugin(NekoPluginBase):
             "type": "object",
             "properties": {
                 "video": {"type": "string", "description": "B站视频链接或BV号，如 BV1xx411c7mD"},
-                "begin_now": {"type": "boolean", "description": "是否立即开始同步陪看（默认 false，等用户说开始）"},
+                "begin_now": {"type": "boolean", "description": "是否立即开始同步陪看（默认 true）"},
             },
             "required": ["video"],
         },
@@ -549,7 +641,7 @@ class WatchPartyPlugin(NekoPluginBase):
             "required": ["video"],
         },
     )
-    async def start_watch_entry(self, video: str = "", begin_now: bool = False, **_):
+    async def start_watch_entry(self, video: str = "", begin_now: bool = True, **_):
         await self._ensure_config_loaded()
         if not _safe_str(video):
             return Err(SdkError("要发我视频链接或BV号喵，比如 BV1xx411c7mD。"))

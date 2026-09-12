@@ -6,6 +6,12 @@ auto_start = false
 
 [neko_watch_party]
 reaction_count = 10
+# 预习完成后自动开始同步陪看（true=一步式；false=等用户说"开始看"）
+auto_begin = true
+# 陪看心跳：每 N 分钟轻推一句进度（0=关闭）
+heartbeat_minutes = 5
+# B站 SESSDATA（浏览器 F12 复制，填了可解锁字幕模式；留空用弹幕模式）
+bili_sessdata = ""
 request_timeout = 15
 llm_timeout = 45
 poll_interval = 2
