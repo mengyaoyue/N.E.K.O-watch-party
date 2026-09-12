@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _OK_SENTINEL = "__SCREEN_OK__"
@@ -38,24 +39,86 @@ def capture_frame(timeout: float = 3.0) -> tuple[bool, Any]:
         return False, f"截屏失败：{exc}"
 
 
-def ocr_frame(frame: Any) -> tuple[bool, str]:
-    """对单帧做本地 OCR（rapidocr），返回 (成功, 合并文字)。"""
+def ocr_frame(frame: Any, keep_boxes: bool = False) -> tuple[bool, Any]:
+    """对单帧做本地 OCR（rapidocr）。
+
+    keep_boxes=False → 返回 (成功, 合并文字)
+    keep_boxes=True  → 返回 (成功, [{text, x, y}] 列表，保留位置用于进度条识别)
+    """
     try:
         from rapidocr_onnxruntime import RapidOCR
 
         ocr = RapidOCR()
         result, _ = ocr(frame)
         if not result:
-            return True, ""
-        lines = []
-        for item in result[:40]:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                text = str(item[1]).strip()
-                if text:
-                    lines.append(text)
-        return True, " ".join(lines)[:600]
+            return True, ("" if not keep_boxes else [])
+        items = []
+        for item in result[:60]:
+            if not (isinstance(item, (list, tuple)) and len(item) >= 2):
+                continue
+            text = str(item[1]).strip()
+            if not text:
+                continue
+            if keep_boxes:
+                box = item[0]
+                xs = [pt[0] for pt in box] if box else [0]
+                ys = [pt[1] for pt in box] if box else [0]
+                items.append({"text": text, "x": min(xs), "y": min(ys)})
+            else:
+                items.append(text)
+        merged = " ".join(items)[:600] if not keep_boxes else items
+        return True, merged
     except Exception as exc:
         return False, f"OCR 失败：{exc}"
+
+
+_TIME_RE = re.compile(r"(?<![0-9])([0-9]{1,2}):([0-5][0-9])(?::([0-5][0-9]))?(?![0-9])")
+
+
+def extract_playback_time(ocr_items: list[dict[str, Any]], screen_h: int) -> Optional[dict[str, int]]:
+    """从 OCR 结果里找播放器进度时间。
+
+    策略：优先找"当前 / 总时长"成对出现的模式（如 01:23 / 09:30），
+    且候选位于屏幕下部（控制栏区域）。返回 {position, total}，找不到 None。
+    """
+    bottom_items = [it for it in ocr_items if it.get("y", 0) >= screen_h * 0.65]
+    candidates: list[dict[str, int]] = []
+    pool = bottom_items + ocr_items  # 底部优先，但保留全文兜底
+    for it in pool:
+        text = it.get("text", "")
+        matches = list(_TIME_RE.finditer(text))
+        if not matches:
+            continue
+        pair = re.search(
+            r"([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)\s*/\s*([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)", text
+        )
+        if pair:
+            pos = _to_seconds(pair.group(1))
+            total = _to_seconds(pair.group(2))
+            if pos is not None and total is not None and 0 <= pos <= total:
+                candidates.append({"position": pos, "total": total})
+                continue
+        for m in matches:
+            sec = _to_seconds(m.group(0))
+            if sec is not None and sec > 3:
+                candidates.append({"position": sec, "total": 0})
+    if not candidates:
+        return None
+    with_total = [c for c in candidates if c["total"] > 0]
+    chosen = (with_total or candidates)[0]
+    if chosen["total"] and chosen["position"] > chosen["total"]:
+        chosen = {"position": chosen["total"], "total": chosen["position"]}
+    return chosen
+
+
+def _to_seconds(text: str) -> Optional[int]:
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        return int(parts[0]) * 60 + int(parts[1])
+    except (ValueError, IndexError):
+        return None
 
 
 def capture_screen_text(timeout: float = 3.0) -> dict[str, Any]:

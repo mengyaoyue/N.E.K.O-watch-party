@@ -20,6 +20,8 @@ bili_sessdata = ""
 screen_assist = false
 # 开启截屏辅助时，"刚才那段"是否截屏（否则只用心跳时的截图）
 screen_on_react = true
+# 自动对齐：心跳时截屏读播放器进度条自动校准（需先开 screen_assist）
+auto_align = true
 request_timeout = 15
 llm_timeout = 45
 poll_interval = 2

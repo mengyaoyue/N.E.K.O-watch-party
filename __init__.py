@@ -32,7 +32,7 @@ from plugin.sdk.plugin import (
 
 from ._panel import PanelServer, find_open_port
 from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window, subtitles_to_text
-from ._screen import capture_screen_text, build_screen_context
+from ._screen import capture_frame, capture_screen_text, ocr_frame, build_screen_context, extract_playback_time
 from ._watch_logic import (
     build_cold_script_prompt,
     build_script_prompt_v2,
@@ -232,6 +232,7 @@ class WatchPartyPlugin(NekoPluginBase):
         self.bili_sessdata = _safe_str(section.get("bili_sessdata"))
         self.screen_assist = _safe_bool(section.get("screen_assist"), False)
         self.screen_on_react = _safe_bool(section.get("screen_on_react"), True)
+        self.auto_align = _safe_bool(section.get("auto_align"), True)
         self.catgirl_name = _safe_str(section.get("catgirl_name"), "猫娘") or "猫娘"
         self.master_name = _safe_str(section.get("master_name"), "主人") or "主人"
         self._config_loaded = True
@@ -509,6 +510,13 @@ class WatchPartyPlugin(NekoPluginBase):
         ):
             session["last_heartbeat"] = time.time()
             minutes, seconds = divmod(int(position), 60)
+            # 自动对齐：截屏读播放器进度条（偏差 ≥30 秒才修正）
+            aligned_note = ""
+            if self.screen_assist and self.auto_align:
+                aligned, aligned_note = self._auto_align(position)
+                if aligned is not None:
+                    position = aligned
+                    minutes, seconds = divmod(int(position), 60)
             recent_fired = [r for r in session["fired"] if abs(r["at"] - position) <= 45]
             if not recent_fired:
                 remark = spontaneous_remark(
@@ -734,6 +742,41 @@ class WatchPartyPlugin(NekoPluginBase):
             target = max(0.0, minute * 60.0)
             session["offset"] += target - self._current_position(session)
         return f"好喵，本喵把进度条拽到 {int(minute)} 分了，跟上了！"
+
+    def _auto_align(self, current_position: float) -> tuple[Optional[float], str]:
+        """截屏读取播放器进度条，自动对齐时间轴（偏差 ≥30 秒才修正）。"""
+        try:
+            ok, frame = capture_frame()
+            if not ok:
+                return None, f"截屏失败：{frame}"
+            ok2, items = ocr_frame(frame, keep_boxes=True)
+        except Exception as exc:
+            return None, f"截屏失败：{exc}"
+        if not ok2:
+            return None, str(items)[:60]
+        if not isinstance(items, list):
+            return None, "OCR 无位置信息"
+        info = (self._session or {}).get("video", {}) if self._session else {}
+        duration = int(info.get("duration") or 0)
+        got = extract_playback_time(items, screen_h=1080)
+        if not got or got.get("total", 0) <= 0:
+            return None, "画面上没读到进度条时间"
+        if duration and abs(got["total"] - duration) > 90:
+            return None, f"进度条总时长 {got['total']}s 与视频 {duration}s 不符，跳过"
+        drift = got["position"] - current_position
+        if abs(drift) < 30:
+            return None, "偏差不足 30 秒"
+        with self._lock:
+            session = self._session
+            if not session or session.get("start_epoch") is None:
+                return None, "会话已结束"
+            session["offset"] += got["position"] - current_position
+        self.logger.info(
+            "[watch_party] 自动对齐：{}s → {}s（偏差 {:+d}s）",
+            int(current_position), got["position"], int(drift),
+        )
+        minutes, seconds = divmod(got["position"], 60)
+        return float(got["position"]), f"已自动对齐到 {minutes} 分{seconds:02d} 秒喵"
 
     async def _read_comments(self) -> str:
         await self._ensure_config_loaded()

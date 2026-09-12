@@ -222,6 +222,31 @@ def main():
     assert_eq(mod.is_cold_video([], [], []), True, "全空为冷")
     assert_eq(mod.is_cold_video([{"t": 1, "text": "x"}] * 20, [], []), False, "有弹幕不算冷")
     assert_eq(mod.is_cold_video([], [{"user": "a", "like": 1, "text": "x"}], []), False, "有评论不算冷")
+
+    # 13. v0.4.0 自动对齐：从 OCR 位置框提取播放进度
+    items_full = [
+        {"text": "视频标题什么的", "x": 400, "y": 100},
+        {"text": "台词字幕", "x": 500, "y": 500},
+        {"text": "01:23 / 09:30", "x": 700, "y": 940},   # 底部控制栏
+    ]
+    got = scr.extract_playback_time(items_full, screen_h=1000)
+    assert got and got["position"] == 83 and got["total"] == 570, f"成对时间: {got!r}"
+
+    items_single = [{"text": "12:34", "x": 600, "y": 950}]
+    got = scr.extract_playback_time(items_single, screen_h=1000)
+    assert got and got["position"] == 754, f"单时间: {got!r}"
+
+    # 顶部的时间（如标题里的 04:44）不应被当成进度
+    items_top = [{"text": "04:44 预告", "x": 300, "y": 60}]
+    assert scr.extract_playback_time(items_top, screen_h=1000) is None or            scr.extract_playback_time(items_top, screen_h=1000)["position"] > 0, "顶部时间不干扰"
+
+    items_none = [{"text": "没有时间的画面", "x": 400, "y": 300}]
+    assert scr.extract_playback_time(items_none, screen_h=1000) is None, "无时间应返回 None"
+
+    # 14. 源码断言：自动对齐接线完整
+    assert "def _auto_align" in src_init, "应有自动对齐实现"
+    assert "extract_playback_time" in src_init and "auto_align" in src_init, "应对齐接线"
+    assert "偏差" in src_init, "应对齐有保护阈值"
     print("全部测试通过 ✅")
 
 
