@@ -33,18 +33,21 @@ from plugin.sdk.plugin import (
 from ._panel import PanelServer, find_open_port
 from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window, subtitles_to_text
 from ._screen import capture_screen_text, build_screen_context
-from ._watch_logic import (    build_script_prompt_v2,
-
+from ._watch_logic import (
+    build_cold_script_prompt,
+    build_script_prompt_v2,
     build_summary,
+    count_for_duration as effective_reaction_count,
     format_reaction,
     format_video_intro,
+    gap_for_rpm,
+    is_cold_video,
     normalize_reactions,
     parse_danmaku_xml,
     parse_video_id,
     sample_danmaku,
-    count_for_duration as effective_reaction_count,
-    gap_for_rpm,
-    spontaneous_remark,)
+    spontaneous_remark,
+)
 
 _PLUGIN_ID = "neko_watch_party"
 
