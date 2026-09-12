@@ -12,6 +12,10 @@ auto_begin = true
 heartbeat_minutes = 5
 # B站 SESSDATA（浏览器 F12 复制，填了可解锁字幕模式；留空用弹幕模式）
 bili_sessdata = ""
+# 截屏辅助：截取主屏画面做本地 OCR，让猫娘"看见"画面（默认关；隐私敏感请保持关闭）
+screen_assist = false
+# 开启截屏辅助时，"刚才那段"是否截屏（否则只用心跳时的截图）
+screen_on_react = true
 request_timeout = 15
 llm_timeout = 45
 poll_interval = 2

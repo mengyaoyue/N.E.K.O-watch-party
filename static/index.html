@@ -60,7 +60,7 @@ async function loadStatus(){
     kv.innerHTML=`<tr><td>状态</td><td>${d.watching?"▶️ 陪看中":"⏸️ 已预习未开始"}</td></tr>
       <tr><td>视频</td><td>${d.title}（${d.bvid}）</td></tr>
       <tr><td>进度</td><td>${fmt(d.position)} / ${fmt(d.duration)}</td></tr>
-      <tr><td>反应点</td><td>${d.fired} / ${d.total} 已触发</td></tr>`;
+      <tr><td>反应点</td><td>${d.fired} / ${d.total} 已触发${d.screen_assist?" · 📷 截屏辅助开":""}</td></tr>`;
     document.getElementById("bar").style.width=pct+"%";
     document.getElementById("status").textContent="已更新喵～";
   }catch(e){document.getElementById("status").textContent="加载失败："+e}

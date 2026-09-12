@@ -32,6 +32,7 @@ from plugin.sdk.plugin import (
 
 from ._panel import PanelServer, find_open_port, _PAGE_CSS
 from ._bili_data import fetch_subtitles, subtitle_window
+from ._screen import capture_screen_text, build_screen_context
 from ._watch_logic import build_script_prompt as build_script_prompt_v2
 from ._watch_logic import (
     build_summary,
@@ -200,6 +201,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self.auto_begin: bool = True
         self.heartbeat_minutes: int = 5
         self.bili_sessdata: str = ""
+        self.screen_assist: bool = False
+        self.screen_on_react: bool = True
         self.request_timeout: float = 15.0
         self.llm_timeout: float = 45.0
         self.poll_interval: float = 2.0
@@ -234,6 +237,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self.auto_begin = _safe_bool(section.get("auto_begin"), True)
         self.heartbeat_minutes = max(0, _safe_int(section.get("heartbeat_minutes"), 5))
         self.bili_sessdata = _safe_str(section.get("bili_sessdata"))
+        self.screen_assist = _safe_bool(section.get("screen_assist"), False)
+        self.screen_on_react = _safe_bool(section.get("screen_on_react"), True)
         self.catgirl_name = _safe_str(section.get("catgirl_name"), "猫娘") or "猫娘"
         self.master_name = _safe_str(section.get("master_name"), "主人") or "主人"
         self._config_loaded = True
@@ -466,6 +471,10 @@ class WatchPartyPlugin(NekoPluginBase):
             near = subtitle_window(session.get("subtitles", []), position)
             line = near[0]["text"][:26] if near else ""
             tail = f"，刚说到「{line}」" if line else ""
+            if self.screen_assist and not line:
+                shot = capture_screen_text()
+                if shot["ok"] and shot["text"]:
+                    tail = f"，画面上有「{shot['text'][:30]}」"
             self._push(f"⏱ 陪看中喵～放到 {minutes} 分{seconds:02d} 秒{tail}，要校准就说「跳到 X 分」")
 
         # 播完自动总结
@@ -506,6 +515,7 @@ class WatchPartyPlugin(NekoPluginBase):
             "duration": video.get("duration", 0),
             "position": int(position),
             "fired": len(session["fired"]), "total": len(session["reactions"]),
+            "screen_assist": self.screen_assist,
         }
 
     def _panel_stop(self, _body: dict[str, Any]) -> dict[str, Any]:
@@ -593,8 +603,21 @@ class WatchPartyPlugin(NekoPluginBase):
             window = [d for d in session["danmaku"] if abs(d["t"] - position) <= 15]
             fired_ids = {r["at"] for r in session["fired"]}
             upcoming = [r for r in session["reactions"] if r["at"] not in fired_ids and r["at"] >= position - 5]
+        screen_ctx = ""
+        if self.screen_assist and self.screen_on_react:
+            shot = capture_screen_text()
+            if shot["ok"]:
+                screen_ctx = build_screen_context(shot["text"])
+                self.logger.info("[watch_party] 截屏辅助：{} 字", len(shot["text"]))
+            else:
+                self.logger.info("[watch_party] 截屏不可用: {}", shot["error"])
         subs = session.get("subtitles") or []
         near_subs = subtitle_window(subs, position) if subs else []
+        if screen_ctx:
+            parts = [f"本喵瞄了一眼你的屏幕喵：{screen_ctx}"]
+            if near_subs:
+                parts.append(f"台词正说到「{near_subs[0]['text'][:40]}」")
+            return "；".join(parts) + "，所以这到底在放什么喵？！"
         if near_subs:
             line = near_subs[len(near_subs) // 2]["text"]
             return f"台词正说到「{line[:40]}」喵，本喵听得很认真！"

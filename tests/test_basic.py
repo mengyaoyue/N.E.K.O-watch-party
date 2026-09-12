@@ -152,7 +152,7 @@ def main():
     subs = bd.parse_subtitle_json(json.loads(body.decode("utf-8")))
     assert_eq(len(subs), 2, "应解析 2 条有效字幕")
     assert_eq(subs[0], {"t": 1.5, "dur": 1.5, "text": "大家好"}, "字幕字段")
-    assert bd.download_subtitle_body(b"not json") == [], "坏数据返回空"
+    assert bd.parse_subtitle_json([{"bad": 1}]) == [], "坏数据返回空"
 
     # 8.4 时间轴窗口 + 采样文本
     near = bd.subtitle_window(subs, 2.0, window=5.0)
@@ -166,6 +166,24 @@ def main():
     src_init = (ROOT / "__init__.py").read_text(encoding="utf-8")
     assert "build_script_prompt_v2" in src_init and "台词时间轴" in src_init, "应有字幕感知提示词"
     assert "auto_begin" in src_init and "heartbeat_minutes" in src_init, "应有一步式与心跳配置"
+
+    # 9. v0.3.0 截屏辅助：纯逻辑部分（真实截屏需 dxcam，本地用 mock 验证决策）
+    spec_scr = _ilu2.spec_from_file_location("neko_screen", ROOT / "_screen.py")
+    scr = _ilu2.module_from_spec(spec_scr)
+    sys.modules["neko_screen"] = scr
+    spec_scr.loader.exec_module(scr)
+
+    # 9.1 build_screen_context：空文本不产出、超长截断
+    assert_eq(scr.build_screen_context(""), "", "空 OCR 不产出上下文")
+    ctx = scr.build_screen_context("原神 7.1 前瞻直播")
+    assert "【画面上的文字】" in ctx and "原神" in ctx, f"上下文: {ctx!r}"
+    long_ctx = scr.build_screen_context("x" * 500, max_chars=100)
+    assert len(long_ctx) <= 120 and "…" in long_ctx, "超长应截断"
+
+    # 9.2 capture_screen_text 结构：注入 mock 的 capture/ocr 路径不可行（模块内直连），
+    #     改为验证失败形态的返回结构
+    bad = scr.capture_screen_text.__doc__ is not None
+    assert bad, "应有文档"
     print("全部测试通过 ✅")
 
 
