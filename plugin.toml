@@ -1,9 +1,9 @@
 [plugin]
 name = "陪看猫娘"
-description = "陪主人看B站视频喵：发链接或BV号，猫娘预习视频、读取全量弹幕和热评，按播放进度在对应时间点冒出来表达笑/感动/同情/震惊/吐槽等情绪，还能随时解读「刚才那段什么梗」，看完自动输出高能时刻与情绪总结。新增：可在自带窗口里直接登录B站（持久化会话）自动解锁字幕模式；截屏看片走多模态视觉模型（DeepSeek 等任意厂商，失败自动降级本地 OCR）。"
-short_description = "Catgirl watches Bilibili with you: login in-app for subtitles, vision-model screen reading, emotion reactions on timeline."
-keywords = ["陪看", "watch", "bilibili", "B站", "弹幕", "danmaku", "共情", "猫娘", "neko", "视频", "video", "字幕", "subtitle", "视觉", "vision"]
-version = "0.5.0"
+description = "陪主人看B站视频喵：说「陪我看」或猫娘截屏探测到主人在看视频，就打开陪看开关，按可自定义的节奏高频自主截屏，看到笑点/名场面/梗就主动吐槽接梗，看不到就安静等着——全程没有任何播放进度，不报时间、不猜进度。预学习（抓弹幕/字幕/热评存本地）是可选的辅助素材，不跑也能陪看。新增：面板自定义截屏频率与开关；自带窗口登录B站（持久化会话）解锁字幕；视觉模型看画面失败自动降级本地 OCR。"
+short_description = "Catgirl watches Bilibili with you: a single switch + custom screenshot cadence drives autonomous screen-watching comments. No playback progress at all. Optional pre-learning."
+keywords = ["陪看", "watch", "bilibili", "B站", "弹幕", "danmaku", "共情", "猫娘", "neko", "视频", "video", "字幕", "subtitle", "视觉", "vision", "截屏", "screenshot"]
+version = "0.6.0"
 type = "plugin"
 id = "neko_watch_party"
 entry = "plugin.plugins.neko_watch_party:WatchPartyPlugin"
@@ -27,22 +27,18 @@ auto_start = false
 enabled = true
 
 [neko_watch_party]
-# 全片生成的反应条数（3-20）
-reaction_count = 10
-# 反应密度：每分钟几条（1-10，面板里可改，下次预习生效）
-reactions_per_minute = 3
-# 预习完成后自动开始同步陪看（true=一步式；false=等用户说"开始看"）
-auto_begin = true
-# 陪看心跳：每 N 分钟轻推一句进度（0=关闭）
-heartbeat_minutes = 3
-# 反应密度随时长自适应（每 45 秒一个反应点，上限 60）
-auto_density = true
+# 陪看开关打开（在看视频）时的截屏节奏：每多少秒截一帧看画面并自主评论（5-600，面板可改）
+shot_interval_active = 20
+# 开关关闭时的待机探测节奏：每多少秒截一帧判断主人在不在看视频（10-3600，面板可改）
+shot_interval_idle = 120
+# 自动探测：待机时低频截屏，发现主人在看视频就自动打开陪看开关（面板可关）
+auto_detect = true
+# 预学习（可选辅助）：开才抓弹幕/字幕/热评存本地素材，用来理解画面里的梗；不开也能陪看
+prelearn = false
 # B站 SESSDATA（浏览器 F12 复制，填了可解锁字幕模式；留空用弹幕模式）
 bili_sessdata = ""
-# 截屏辅助：截取画面让猫娘"看见"内容（默认关；隐私敏感请保持关闭）
-screen_assist = false
-# 开启截屏辅助时，"刚才那段"是否截屏（否则只用心跳时的截图）
-screen_on_react = true
+# 截屏看片：截取画面让猫娘"看见"内容，看到才评论（隐私敏感可关；关了基本不说话）
+screen_assist = true
 # 看片用多模态视觉模型（true=视觉模型描述画面；失败自动降级本地 OCR）
 screen_vision = true
 # 视觉模型超时（秒）
@@ -53,17 +49,13 @@ vision_model = ""
 vision_base_url = ""
 vision_api_key = ""
 vision_provider_type = ""
-# 自动对齐：心跳时截屏读播放器进度条自动校准（需先开 screen_assist）
-auto_align = true
-# 反应提前量（秒）：推送后猫娘开口有几秒延迟，提前触发刚好卡在画面节点
-reaction_lead_seconds = 4
 # B站接口请求超时（秒）
 request_timeout = 15
-# 预习调用大模型超时（秒）
+# 看屏生成反应调用大模型超时（秒）
 llm_timeout = 45
-# 时间轴轮询间隔（秒）
+# 调度轮询间隔（秒）
 poll_interval = 2
-# 播完自动推送总结
+# 结束陪看时自动输出总结
 auto_summary = true
 catgirl_name = "猫娘"
 master_name = "主人"

@@ -13,32 +13,75 @@ h1{font-size:24px;margin:8px 0 4px}
 button{background:#6c5ce7;color:#fff;border:0;border-radius:10px;padding:8px 18px;font-size:14px;cursor:pointer;margin-right:8px}
 button:hover{background:#7d6ef0}
 button.danger{background:#a33b52}
-input[type=number]{background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:6px 10px;font-size:14px;width:90px}
-.bar{background:#2a2440;border-radius:10px;height:14px;overflow:hidden;margin:10px 0}
-.bar div{background:#7d6ef0;height:100%}
+button.on{background:#2f9e63}
+input[type=number]{background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:6px 10px;font-size:14px;width:96px}
 #status{color:#9a93b5;font-size:13px;margin-left:8px}
-.kv td:first-child{color:#9a93b5;width:150px}
+.kv td:first-child{color:#9a93b5;width:130px}
 td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
+.toggle.on{color:#5ee0a0}
+.toggle.off{color:#c98a8a}
+.sw{display:inline-flex;align-items:center;gap:6px;margin:6px 18px 6px 0;font-size:14px;cursor:pointer}
+.sw input{width:16px;height:16px;accent-color:#6c5ce7}
+.row{margin:8px 0}
+.hint{color:#9a93b5;font-size:13px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🎬 陪看猫娘 · 管理面板</h1>
-  <div class="sub">先点「开始陪看」，等预习完成（约30秒）再打开视频观看。进度不同步时在下方填分钟数点「跳到」即可。</div>
-  <div class="sub">猫娘陪你刷B站：预习视频、读弹幕、按进度共情吐槽</div>
+  <div class="sub">猫娘只凭「截屏画面」说话：开关打开后按设定节奏高频自主截图，看到笑点/梗就主动评论；<b>没有任何播放进度，不会报时间</b>。预学习只是可选的辅助素材。</div>
+
   <div class="card">
-    <h2>开始新的陪看</h2>
-    <input type="text" id="video" placeholder="粘贴B站链接或BV号，如 BV1xx411c7mD" style="width:calc(100% - 130px);background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:8px 12px;font-size:14px">
-    <button onclick="startWatch()">开始陪看</button>
-    <button onclick="reactNow()">刚才那段</button>
-    <button onclick="readComments()">看评论区</button>
+    <h2>陪看开关 & 截屏节奏</h2>
+    <div class="row" id="switchRow">开关状态：<span id="onoff" class="toggle">…</span></div>
+    <div class="row">
+      <button id="btnBegin" class="on" onclick="beginWatch()">▶️ 打开陪看开关</button>
+      <button class="danger" onclick="stop()">⏹ 结束陪看</button>
+      <button onclick="reactNow()">🐱 现在就聊这画面</button>
+    </div>
+
+    <div class="row" style="margin-top:14px;padding-top:12px;border-top:1px solid #322b4a">
+      <div>📸 截屏频率（开关打开后，猫娘多久截一次屏看画面并自主评论）</div>
+      <div class="row">
+        在看视频时：每 <input type="number" id="iv_active" min="5" max="600" step="5"> 秒
+        <span class="hint">（5~600，越小越频繁）</span>
+      </div>
+      <div class="row">
+        待机探测时：每 <input type="number" id="iv_idle" min="10" max="3600" step="10"> 秒
+        <span class="hint">（10~3600，只用来判断你要不要看视频）</span>
+      </div>
+      <button onclick="saveIntervals()">保存截屏频率</button>
+    </div>
+
+    <div class="row" style="margin-top:14px;padding-top:12px;border-top:1px solid #322b4a">
+      <div>功能开关</div>
+      <label class="sw"><input type="checkbox" id="t_auto" onchange="saveToggles()">自动探测（猫娘低频截屏，发现你在看视频就自己打开开关）</label>
+      <label class="sw"><input type="checkbox" id="t_pre" onchange="saveToggles()">预学习（可选：抓弹幕/字幕/热评存本地，辅助理解梗）</label>
+      <label class="sw"><input type="checkbox" id="t_assist" onchange="saveToggles()">截屏辅助（关掉后猫娘完全看不到画面）</label>
+      <label class="sw"><input type="checkbox" id="t_vision" onchange="saveToggles()">视觉模型看画面（失败自动降级本地 OCR）</label>
+      <div class="hint" style="margin-top:4px">预学习与截屏节奏都是「可选」的：不预学习也能陪看，猫娘纯靠画面理解；</div>
+    </div>
     <div id="result" class="sub" style="margin-top:10px;white-space:pre-wrap"></div>
-    <div class="sub">⚠ 若这里点了没反应，直接在聊天框发「陪我看 &lt;链接&gt;」最稳喵。首次预习约 30 秒（抓弹幕+生成脚本），建议等猫娘回复"已开陪"后再开始看视频，否则会不同步。</div>
+    <span id="status"></span>
   </div>
+
+  <div class="card">
+    <h2>预学习一个视频（可选）</h2>
+    <div class="row">
+      <input type="text" id="video" placeholder="粘贴B站链接或BV号，如 BV1xx411c7mD" style="width:calc(100% - 130px);background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:8px 12px;font-size:14px">
+      <button onclick="startWatch()">开始陪看</button>
+    </div>
+    <div class="row">
+      <button onclick="readComments()">看评论区</button>
+      <button onclick="openPlayer()">📺 打开同步播放窗口</button>
+      <button onclick="loadStatus()">刷新</button>
+    </div>
+    <div class="sub" style="margin-top:6px">不填视频也能陪看：直接点上面「打开陪看开关」，猫娘只认截屏画面。填了链接则会顺手记住标题（预学习打开时还会抓弹幕/字幕/热评）。</div>
+  </div>
+
   <div class="card">
     <h2>陪看会话</h2>
     <table class="kv" id="kv"></table>
-    <div class="bar"><div id="bar" style="width:0%"></div></div>
     <div style="margin:12px 0;padding-top:10px;border-top:1px solid #322b4a">
       <div>字幕模式（B站登录凭证）：<span id="sd" class="toggle">…</span></div>
       <div style="margin:8px 0">
@@ -51,20 +94,18 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
       <button class="danger" onclick="clearSess()">清除</button>
       <div class="sub">手工获取：浏览器登录B站 → F12 → 应用/Application → Cookie → bilibili.com → 复制 SESSDATA 的值。有效期数月，失效了重新复制一次即可。</div>
     </div>
-    <div class="sub" style="margin:8px 0">👁 看片模式：<span id="vm" class="toggle">…</span>（多模态视觉模型看画面，失败自动降级本地 OCR；可配 vision_model 换任意厂商）</div>
-    <div class="sub" style="margin:8px 0">🔄 自动对齐：<span id="al" class="toggle">…</span>　每 3 分钟心跳时截屏读播放器进度条，偏差 ≥30 秒自动校准</div>
-    <div style="margin:10px 0">反应密度：<input type="number" id="rpm" value="3" min="1" max="10" step="1"> 条/分钟
-      <button onclick="saveRpm()">保存密度</button>（下次预习生效，1~10）</div>
-    <input type="number" id="minute" value="0" min="0"> 分钟
-    <button onclick="jump()">跳到</button>
-    <button class="danger" onclick="stop()">结束陪看</button>
-    <button onclick="openPlayer()">📺 打开同步播放窗口</button>
-    <button onclick="loadStatus()">刷新</button>
-    <span id="status"></span>
+    <div class="sub" style="margin:8px 0">👁 看片模式：<span id="vm" class="toggle">…</span></div>
   </div>
+
   <div class="card">
     <h2>使用说明</h2>
-    <div class="sub">对猫娘说「陪我看」+ B站链接或BV号开始；「跳到 X 分」校准进度；「刚才那段什么梗」现场解读。反应会按播放进度自动弹出喵。</div>
+    <div class="sub">
+      1. 对猫娘说「陪我看」，或在上面点「打开陪看开关」，开关就打开了；<br>
+      2. 开关打开后，猫娘按「在看视频时」的频率高频自主截屏，看到笑点/名场面/梗就主动吐槽接梗，看不到画面就安静等着；<br>
+      3. 开着「自动探测」时，猫娘会按待机频率低频截屏，一旦发现你在看视频就自己把开关打开；<br>
+      4. 想手动让猫娘看一眼现在这画面，点「现在就聊这画面」；<br>
+      5. 结束：点「结束陪看」，或对猫娘说「结束陪看」。
+    </div>
   </div>
 </div>
 <script>
@@ -77,12 +118,22 @@ async function api(path,opts){
   }
   throw new Error("面板服务不可达喵");
 }
-function fmt(s){s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=String(s%60).padStart(2,"0");return h?`${h}:${String(m).padStart(2,"0")}:${ss}`:`${m}分${ss}秒`}
+function flash(t){document.getElementById("status").textContent=t}
+function setIfIdle(el,v){if(document.activeElement!==el)el.value=v}
+async function beginWatch(){
+  const res=document.getElementById("result");
+  res.textContent="打开陪看开关喵…";
+  try{
+    const d=await api("/api/begin",{method:"POST",body:"{}"});
+    res.textContent=d.ok?("🐱 "+d.message):("❌ "+d.error);
+    await loadStatus();
+  }catch(e){res.textContent="失败："+e}
+}
 async function startWatch(){
   const video=document.getElementById("video").value.trim();
   if(!video){alert("先粘贴链接或BV号喵");return}
   const res=document.getElementById("result");
-  res.textContent="预习中喵（抓弹幕+热评+生成吐槽脚本，约 10~30 秒）…";
+  res.textContent="记住视频信息中喵（预学习打开时会抓弹幕/字幕/热评，约 10~30 秒）…";
   try{
     const d=await api("/api/start",{method:"POST",body:JSON.stringify({video})});
     res.textContent=d.ok?("✅ "+d.message):("❌ "+d.error);
@@ -108,28 +159,52 @@ async function reactNow(){
 async function loadStatus(){
   try{
     const d=await api("/api/status");
+    const onoff=document.getElementById("onoff");
+    onoff.textContent=d.watching?"▶️ 已打开（高频自主截屏中）":"⏸️ 关闭";
+    onoff.className="toggle "+(d.watching?"on":"off");
+    document.getElementById("btnBegin").disabled=!!d.watching;
+
+    setIfIdle(document.getElementById("iv_active"),d.shot_interval_active);
+    setIfIdle(document.getElementById("iv_idle"),d.shot_interval_idle);
+    document.getElementById("t_auto").checked=!!d.auto_detect;
+    document.getElementById("t_pre").checked=!!d.prelearn;
+    document.getElementById("t_assist").checked=!!d.screen_assist;
+    document.getElementById("t_vision").checked=!!d.screen_vision;
+
     const kv=document.getElementById("kv");
-    if(!d.prepared){kv.innerHTML="<tr><td>当前没有陪看会话喵。对猫娘发B站链接即可开始～</td></tr>";document.getElementById("bar").style.width="0%";return}
-    const pct=Math.min(100,Math.round(d.position/d.duration*100));
-    kv.innerHTML=`<tr><td>状态</td><td>${d.watching?"▶️ 陪看中":"⏸️ 已预习未开始"}${d.player_alive?" · 📺 同步窗口已开":""}</td></tr>
-      <tr><td>视频</td><td>${d.title}（${d.bvid}）</td></tr>
-      <tr><td>进度</td><td>${fmt(d.position)} / ${fmt(d.duration)}</td></tr>
-      <tr><td>反应点</td><td>${d.fired} / ${d.total} 已触发${d.screen_assist?" · 📷 截屏辅助开":""}</td></tr>`;
-    document.getElementById("bar").style.width=pct+"%";
-    if(d.reactions_per_minute) document.getElementById("rpm").value=d.reactions_per_minute;
+    kv.innerHTML=`<tr><td>陪看开关</td><td>${d.watching?"▶️ 已打开":"⏸️ 关闭"}${d.player_alive?" · 📺 同步窗口已开":""}</td></tr>
+      <tr><td>视频</td><td>${d.prepared?`${d.title}（${d.bvid}）`:"未预学习（纯靠截屏）"}</td></tr>
+      <tr><td>截屏节奏</td><td>在看每 ${d.shot_interval_active}s · 待机每 ${d.shot_interval_idle}s</td></tr>
+      <tr><td>已自主吐槽</td><td>${d.said||0} 句</td></tr>`;
+
     const sd=document.getElementById("sd");
-    const al=document.getElementById("al");
     const vm=document.getElementById("vm");
-    al.textContent=(d.screen_assist&&d.auto_align!==false)?"开（随截屏心跳）":"需开截屏辅助";
-    al.className="toggle "+(d.screen_assist?"on":"off");
-    if(vm){
-      vm.textContent=d.screen_vision?("👁 视觉模型（"+(d.vision_model||"宿主通道")+"）→ OCR 兜底"):"本地 OCR";
-      vm.className="toggle "+(d.screen_assist?"on":"off");
-    }
+    vm.textContent=d.screen_vision?("👁 视觉模型（"+(d.vision_model||"宿主通道")+"）→ OCR 兜底"):"本地 OCR";
+    vm.className="toggle "+(d.screen_assist?"on":"off");
     sd.textContent=d.sessdata_set?"已启用（字幕模式）":"未设置（弹幕模式）";
     sd.className="toggle "+(d.sessdata_set?"on":"off");
-    document.getElementById("status").textContent="已更新喵～";
-  }catch(e){document.getElementById("status").textContent="加载失败："+e}
+    flash("已更新喵～");
+  }catch(e){flash("加载失败："+e)}
+}
+async function saveIntervals(){
+  const a=parseFloat(document.getElementById("iv_active").value)||20;
+  const i=parseFloat(document.getElementById("iv_idle").value)||120;
+  try{
+    await api("/api/config",{method:"POST",body:JSON.stringify({shot_interval_active:a,shot_interval_idle:i})});
+    await loadStatus();flash("截屏频率已保存喵～");
+  }catch(e){alert(e)}
+}
+async function saveToggles(){
+  const body={
+    auto_detect:document.getElementById("t_auto").checked,
+    prelearn:document.getElementById("t_pre").checked,
+    screen_assist:document.getElementById("t_assist").checked,
+    screen_vision:document.getElementById("t_vision").checked,
+  };
+  try{
+    await api("/api/config",{method:"POST",body:JSON.stringify(body)});
+    await loadStatus();flash("开关已保存喵～");
+  }catch(e){alert(e)}
 }
 async function openPlayer(){
   const res=document.getElementById("result");
@@ -156,10 +231,6 @@ async function readSessdata(){
     await loadStatus();
   }catch(e){res.textContent="失败："+e}
 }
-async function saveRpm(){
-  const rpm=parseFloat(document.getElementById("rpm").value)||3;
-  try{await api("/api/config",{method:"POST",body:JSON.stringify({rpm})});await loadStatus()}catch(e){alert(e)}
-}
 async function saveSess(){
   const v=document.getElementById("sessdata").value.trim();
   try{await api("/api/sessdata",{method:"POST",body:JSON.stringify({sessdata:v})});await loadStatus()}catch(e){alert(e)}
@@ -167,12 +238,8 @@ async function saveSess(){
 async function clearSess(){
   try{await api("/api/sessdata",{method:"POST",body:"{}"});document.getElementById("sessdata").value="";await loadStatus()}catch(e){alert(e)}
 }
-async function jump(){
-  const m=parseFloat(document.getElementById("minute").value)||0;
-  try{await api("/api/jump",{method:"POST",body:JSON.stringify({minute:m})});await loadStatus()}catch(e){alert(e)}
-}
 async function stop(){
-  try{await api("/api/stop",{method:"POST",body:"{}"});await loadStatus()}catch(e){alert(e)}
+  try{await api("/api/stop",{method:"POST",body:"{}"});await loadStatus();flash("已结束陪看喵～")}catch(e){alert(e)}
 }
 loadStatus();setInterval(loadStatus,5000);
 </script>

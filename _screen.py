@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any, Optional
 
 _JPEG_QUALITY = 80
@@ -29,6 +28,12 @@ _MAX_SIDE = 1280
 VISION_PROMPT = (
     "这是一张B站视频的播放画面截图。请用不超过40字的中文客观描述画面里正在发生什么"
     "（人物/动作/场景/画面上的文字或字幕），不要加括号、不要评价、不要编造看不到的内容。"
+)
+
+# 待机探测用：只问"有没有在放视频"，不要它描述内容，越短越省 token、越不容易乱答。
+PLAYING_PROBE_PROMPT = (
+    "这是当前电脑屏幕的截图。请只回答主人现在是不是正在看/播放视频（例如B站等视频页面），"
+    "只回一个字：是 或 否。不要解释、不要描述画面。"
 )
 
 
@@ -118,7 +123,7 @@ def ocr_frame(frame: Any, keep_boxes: bool = False) -> tuple[bool, Any]:
     """对单帧做本地 OCR（rapidocr）。
 
     keep_boxes=False → 返回 (成功, 合并文字)
-    keep_boxes=True  → 返回 (成功, [{text, x, y}] 列表，保留位置用于进度条识别)
+    keep_boxes=True  → 返回 (成功, [{text, x, y}] 列表，保留文字位置)
     """
     try:
         from rapidocr_onnxruntime import RapidOCR
@@ -145,45 +150,6 @@ def ocr_frame(frame: Any, keep_boxes: bool = False) -> tuple[bool, Any]:
         return True, merged
     except Exception as exc:
         return False, f"OCR 失败：{exc}"
-
-
-_TIME_RE = re.compile(r"(?<![0-9])([0-9]{1,2}):([0-5][0-9])(?::([0-5][0-9]))?(?![0-9])")
-
-
-def extract_playback_time(ocr_items: list[dict[str, Any]], screen_h: int) -> Optional[dict[str, int]]:
-    """从 OCR 结果里找播放器进度时间。
-
-    只认"当前 / 总时长"成对格式（如 01:23 / 09:30）——
-    单独出现的时间一律不采信：系统时钟（21:47）、视频时长标签都在屏幕底部，
-    误认会把本地时间当成播放进度（真实事故）。
-    返回 {position, total}，找不到 None。
-    """
-    pair_re = re.compile(
-        r"([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)\s*/\s*([0-9]{1,2}:[0-5][0-9](?::[0-5][0-9])?)"
-    )
-    for it in ocr_items:
-        text = it.get("text", "")
-        m = pair_re.search(text)
-        if not m:
-            continue
-        pos = _to_seconds(m.group(1))
-        total = _to_seconds(m.group(2))
-        if pos is None or total is None or total == 0:
-            continue
-        if pos > total:
-            pos, total = total, pos  # 顺序颠倒自动纠正
-        return {"position": pos, "total": total}
-    return None
-
-
-def _to_seconds(text: str) -> Optional[int]:
-    parts = text.split(":")
-    try:
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-        return int(parts[0]) * 60 + int(parts[1])
-    except (ValueError, IndexError):
-        return None
 
 
 def capture_screen_text(timeout: float = 3.0) -> dict[str, Any]:

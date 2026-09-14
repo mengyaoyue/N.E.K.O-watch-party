@@ -1,9 +1,18 @@
 from __future__ import annotations
-"""陪看猫娘（neko_watch_party）v0.1 · 作者：MENGYAOYUE
+"""陪看猫娘（neko_watch_party）v0.6 · 作者：MENGYAOYUE
 
-陪主人看B站视频：抓视频信息 + 全量弹幕 + 热评，一次 LLM 调用生成"陪看脚本"
-（带时间戳的情绪反应），按播放进度到点让猫娘冒出来表达 笑/感动/同情/震惊/吐槽。
-支持 /跳到 校准进度、随时问"刚才那段什么梗"、看完自动总结。
+陪主人看视频：开关打开后，猫娘**高频自主截屏**，把画面交给视觉模型理解，
+看到内容就主动评论、抓笑点与梗；看不到画面就安静等着。
+
+开关有两种打开方式（相当于一个开关）：
+1. 主人说「陪我看」；
+2. 猫娘自己截屏探测到主人正在看视频（低频探测，面板可关）。
+
+**本插件没有任何"播放进度/时间点"概念**：猫娘只凭截屏画面说话，
+不报时间、不猜进度、不读进度条——从根上杜绝进度类幻觉。
+
+预学习（抓弹幕/字幕/热评存本地时间轴库）是**可选辅助**，默认不跑、主人想跑才跑；
+素材只用于帮猫娘看懂画面里看不清的梗，绝不会变成"当前进度"喂给模型。
 
 数据全部匿名读取公开接口（UA + buvid3），零第三方依赖；评论接口失败自动降级。
 """
@@ -32,33 +41,29 @@ from plugin.sdk.plugin import (
 
 from ._panel import PanelServer, find_open_port
 from ._player_window import PlayerWindow
-from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window, subtitles_to_text
+from ._bili_data import fetch_subtitles, fetch_via_page
 from ._screen import (
-    build_screen_context,
-    capture_frame,
+    PLAYING_PROBE_PROMPT,
     capture_screen_text,
     describe_frame,
     describe_screen,
-    extract_playback_time,
-    ocr_frame,
 )
+from ._timeline_db import TimelineDB
 from ._watch_logic import (
-    build_cold_script_prompt,
-    build_script_prompt_v2,
+    build_material_overview,
+    build_screen_reaction_prompt,
     build_summary,
-    count_for_duration as effective_reaction_count,
     format_reaction,
     format_video_intro,
-    gap_for_rpm,
-    is_cold_video,
-    normalize_reactions,
+    looks_like_video_ui,
     parse_danmaku_xml,
+    parse_playing_answer,
+    parse_screen_reaction,
     parse_video_id,
-    sample_danmaku,
-    spontaneous_remark,
 )
 
 _PLUGIN_ID = "neko_watch_party"
+_VERSION = "0.6.0"
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -104,6 +109,17 @@ def _safe_int(value: Any, default: int) -> int:
         except ValueError:
             return default
     return default
+
+
+def _clamp_float(value: Any, low: float, high: float, default: float) -> float:
+    """把配置值收敛到 [low, high]；非法值回退 default。"""
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, num))
 
 
 def _http_get(url: str, cookie: str = "", timeout: float = 15.0) -> tuple[int, bytes]:
@@ -188,20 +204,25 @@ async def _call_llm(system: str, user: str, timeout: float) -> str:
 
 
 class WatchPartyPlugin(NekoPluginBase):
-    """陪看猫娘：读取视频内容与弹幕，按进度共情陪伴。"""
+    """陪看猫娘：一个开关 + 可配置的截屏节奏，看到画面才主动评论、抓笑点。
+
+    - 开关打开（主人说「陪我看」或截屏探测到在看视频）→ 按 shot_interval_active 高频截屏评论；
+    - 开关关闭且开着 auto_detect → 按 shot_interval_idle 低频探测要不要自动打开；
+    - **全流程没有任何播放进度/时间点**，素材只做整片级背景参考。
+    """
 
     def __init__(self, ctx):
         super().__init__(ctx)
         self.file_logger = self.enable_file_logging(log_level="INFO")
         self.logger = self.file_logger
 
-        self.reaction_count: int = 10
-        self.auto_begin: bool = True
-        self.heartbeat_minutes: int = 5
-        self.bili_sessdata: str = ""
-        self.screen_assist: bool = False
-        self.screen_on_react: bool = True
+        self.screen_assist: bool = True
         self.screen_vision: bool = True
+        self.auto_detect: bool = True
+        self.prelearn: bool = False
+        self.shot_interval_active: float = 20.0
+        self.shot_interval_idle: float = 120.0
+        self.bili_sessdata: str = ""
         self.vision_timeout: float = 25.0
         self.vision_model: str = ""
         self.vision_base_url: str = ""
@@ -215,9 +236,17 @@ class WatchPartyPlugin(NekoPluginBase):
         self.master_name: str = "主人"
         self._config_loaded = False
 
-        # 陪看会话（内存态；重启即视为结束，无需持久化）
+        # 陪看开关（内存态；重启即为关闭）
         self._lock = threading.Lock()
+        self._watching: bool = False
+        # 可选预学习素材（关闭预学习时为 None；只做整片级背景，不含任何时间点）
         self._session: Optional[dict[str, Any]] = None
+        # 开关打开后本喵说过的话（用于去重 + 结束总结）
+        self._said: list[dict[str, Any]] = []
+        self._recent: list[str] = []
+        self._last_comment_ts: float = 0.0
+        # 待机探测：距上次"是否在看视频"探测的时间戳
+        self._last_probe_ts: float = 0.0
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._tick_thread: Optional[threading.Thread] = None
@@ -226,6 +255,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self._panel_loop: Optional[asyncio.AbstractEventLoop] = None
         self._pwindow: Optional[PlayerWindow] = None
         self._panel_loop_thread: Optional[threading.Thread] = None
+        # 本地时间轴库：仅在开着预学习时写入素材，供以后复用理解梗
+        self._timeline: Optional[TimelineDB] = None
 
     # ── 配置 ───────────────────────────────────────────────────
     async def _load_config(self) -> None:
@@ -236,20 +267,17 @@ class WatchPartyPlugin(NekoPluginBase):
             cfg = {}
         section = cfg.get(_PLUGIN_ID) if isinstance(cfg, dict) else None
         section = section if isinstance(section, dict) else {}
-        self.reaction_count = max(3, _safe_int(section.get("reaction_count"), 10))
         self.request_timeout = max(5.0, float(_safe_int(section.get("request_timeout"), 15)))
         self.llm_timeout = max(10.0, float(_safe_int(section.get("llm_timeout"), 45)))
         self.poll_interval = max(1.0, float(_safe_int(section.get("poll_interval"), 2)))
         self.auto_summary = bool(section.get("auto_summary", True))
-        self.auto_begin = _safe_bool(section.get("auto_begin"), True)
-        self.auto_density = _safe_bool(section.get("auto_density"), True)
-        self.reactions_per_minute = max(0.5, min(10.0, float(_safe_int(section.get("reactions_per_minute"), 3))))
-        self.heartbeat_minutes = max(0, _safe_int(section.get("heartbeat_minutes"), 5))
         self.bili_sessdata = _safe_str(section.get("bili_sessdata"))
-        self.screen_assist = _safe_bool(section.get("screen_assist"), False)
-        self.screen_on_react = _safe_bool(section.get("screen_on_react"), True)
-        self.auto_align = _safe_bool(section.get("auto_align"), True)
-        self.reaction_lead_seconds = max(0.0, float(_safe_int(section.get("reaction_lead_seconds"), 4)))
+        self.screen_assist = _safe_bool(section.get("screen_assist"), True)
+        # 截屏节奏：激活（在看视频）高频、待机低频探测，均可面板自定义
+        self.shot_interval_active = _clamp_float(section.get("shot_interval_active"), 5.0, 600.0, 20.0)
+        self.shot_interval_idle = _clamp_float(section.get("shot_interval_idle"), 10.0, 3600.0, 120.0)
+        self.auto_detect = _safe_bool(section.get("auto_detect"), True)
+        self.prelearn = _safe_bool(section.get("prelearn"), False)
         # 视觉看片：优先用多模态模型描述画面，失败再降级本地 OCR
         self.screen_vision = _safe_bool(section.get("screen_vision"), True)
         self.vision_timeout = max(5.0, float(_safe_int(section.get("vision_timeout"), 25)))
@@ -276,24 +304,46 @@ class WatchPartyPlugin(NekoPluginBase):
         )
         self._tick_thread.start()
         self._start_panel_loop()
-        if not self.bili_sessdata:
-            try:
-                state_path = Path(self.data_path()) / "panel_state.json"
-                saved = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-                self.bili_sessdata = str(saved.get("bili_sessdata") or "")
-            except Exception:
-                pass
+        saved: dict[str, Any] = {}
         try:
             state_path = Path(self.data_path()) / "panel_state.json"
             saved = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-            saved_rpm = saved.get("reactions_per_minute")
-            if saved_rpm:
-                self.reactions_per_minute = max(0.5, min(10.0, float(saved_rpm)))
         except Exception:
-            pass
+            saved = {}
+        if not self.bili_sessdata:
+            self.bili_sessdata = str(saved.get("bili_sessdata") or "")
+        self._apply_saved_panel_state(saved)
         self._start_panel()
-        self.logger.info("[watch_party] 启动：reaction_count={}", self.reaction_count)
-        return Ok({"status": "running", "version": "0.1.0"})
+        self.logger.info(
+            "[watch_party] 启动：截屏辅助 {}｜开关频率 {:.0f}s｜待机探测 {}s（{}）｜预学习 {}",
+            self.screen_assist,
+            self.shot_interval_active,
+            self.shot_interval_idle,
+            "开" if self.auto_detect else "关",
+            "开" if self.prelearn else "关",
+        )
+        return Ok({"status": "running", "version": _VERSION})
+
+    def _apply_saved_panel_state(self, saved: dict[str, Any]) -> None:
+        """面板改过的节奏/开关落盘后，重启时覆盖配置默认值。"""
+        if not isinstance(saved, dict):
+            return
+        if saved.get("shot_interval_active") is not None:
+            self.shot_interval_active = _clamp_float(
+                saved.get("shot_interval_active"), 5.0, 600.0, self.shot_interval_active
+            )
+        if saved.get("shot_interval_idle") is not None:
+            self.shot_interval_idle = _clamp_float(
+                saved.get("shot_interval_idle"), 10.0, 3600.0, self.shot_interval_idle
+            )
+        if "auto_detect" in saved:
+            self.auto_detect = _safe_bool(saved.get("auto_detect"), self.auto_detect)
+        if "prelearn" in saved:
+            self.prelearn = _safe_bool(saved.get("prelearn"), self.prelearn)
+        if "screen_assist" in saved:
+            self.screen_assist = _safe_bool(saved.get("screen_assist"), self.screen_assist)
+        if "screen_vision" in saved:
+            self.screen_vision = _safe_bool(saved.get("screen_vision"), self.screen_vision)
 
     @lifecycle(id="shutdown")
     def shutdown(self, **_):
@@ -311,6 +361,9 @@ class WatchPartyPlugin(NekoPluginBase):
         self._wake_event.set()
         if self._tick_thread and self._tick_thread.is_alive():
             self._tick_thread.join(timeout=3.0)
+        if self._timeline is not None:
+            self._timeline.close()
+            self._timeline = None
         self.logger.info("[watch_party] 关闭")
         return Ok("stopped")
 
@@ -406,8 +459,9 @@ class WatchPartyPlugin(NekoPluginBase):
             out.append({"user": user, "like": like, "text": msg})
         return out
 
-    # ── 陪看脚本生成 ───────────────────────────────────────────
+    # ── 预学习（可选辅助）：素材入库，不预写脚本、不含时间点 ──────
     async def _prepare_session(self, video_text: str) -> dict[str, Any]:
+        """解析视频 + 可选预学习。**预学习是可选的**：关着就只认标题，不抓素材。"""
         await self._ensure_config_loaded()
         video_id = parse_video_id(video_text)
         if not video_id:
@@ -417,86 +471,67 @@ class WatchPartyPlugin(NekoPluginBase):
         t0 = time.time()
         video = await self._fetch_video(video_id)
         self.logger.info(
-            "[watch_party] 预习①视频信息 OK：bvid={} cid={} 时长={}s（{:.1f}s）",
-            video.get("bvid"), video.get("cid"), video.get("duration"), time.time() - t0,
+            "[watch_party] 视频信息 OK：bvid={} 标题={}（{:.1f}s）",
+            video.get("bvid"), str(video.get("title") or "")[:30], time.time() - t0,
         )
 
-        danmaku = await self._fetch_danmaku(video["cid"], video.get("bvid", ""))
-        self.logger.info("[watch_party] 预习②弹幕 {} 条", len(danmaku))
-        await asyncio.sleep(0.3)
-
-        # 字幕（时间轴台词）：优先用同步播放窗口里已登录的会话（免 F12 手动复制），
-        # 其次用配置/面板保存的 SESSDATA；都没有就跳过走弹幕模式
-        sessdata = self.bili_sessdata or await asyncio.to_thread(self._sessdata_from_window)
+        danmaku: list[dict[str, Any]] = []
         subtitles: list[dict[str, Any]] = []
-        cookie = f"SESSDATA={sessdata}" if sessdata else ""
-        if video.get("bvid") and video.get("cid"):
+        comments: list[dict[str, Any]] = []
+        if self.prelearn:
+            danmaku = await self._fetch_danmaku(video["cid"], video.get("bvid", ""))
+            self.logger.info("[watch_party] 预学习①弹幕 {} 条", len(danmaku))
+            await asyncio.sleep(0.3)
+            sessdata = self.bili_sessdata or await asyncio.to_thread(self._sessdata_from_window)
+            cookie = f"SESSDATA={sessdata}" if sessdata else ""
+            if video.get("bvid") and video.get("cid"):
+                try:
+                    subtitles = await asyncio.to_thread(
+                        fetch_subtitles, video["bvid"], video["cid"], cookie, self.request_timeout
+                    )
+                except Exception as exc:
+                    self.logger.warning("[watch_party] 字幕获取失败: {}", exc)
+            self.logger.info("[watch_party] 预学习②字幕 {} 条", len(subtitles))
+            comments = await self._fetch_comments(video["aid"]) if video.get("aid") else []
+            self.logger.info("[watch_party] 预学习③热评 {} 条", len(comments))
             try:
-                subtitles = await asyncio.to_thread(
-                    fetch_subtitles, video["bvid"], video["cid"], cookie, self.request_timeout
+                saved = await asyncio.to_thread(
+                    self._ensure_timeline().save_timeline, video, danmaku, subtitles, comments
+                )
+                self.logger.info(
+                    "[watch_party] 预学习素材入库 弹幕{} 字幕{} 热评{}（共 {:.1f}s）",
+                    saved.get("danmaku"), saved.get("subtitles"), saved.get("comments"), time.time() - t0,
                 )
             except Exception as exc:
-                self.logger.warning("[watch_party] 字幕获取失败: {}", exc)
-        self.logger.info("[watch_party] 预习③字幕 {} 条（{}）", len(subtitles), "字幕模式" if subtitles else "弹幕模式")
+                self.logger.warning("[watch_party] 时间轴库写入失败（不影响陪看）：{}", exc)
+        else:
+            self.logger.info("[watch_party] 预学习关闭，仅记住标题，不抓任何素材")
 
-        comments = await self._fetch_comments(video["aid"]) if video.get("aid") else []
-        self.logger.info("[watch_party] 预习④热评 {} 条", len(comments))
-        comment_texts = [c["text"] for c in comments]
-
-        subtitle_text = subtitles_to_text(subtitles)
-        sampled = sample_danmaku(danmaku)
-        rpm = self.reactions_per_minute if self.auto_density else max(1.0, 60.0 / max(1, self.reaction_count))
-        want = effective_reaction_count(video["duration"], rpm, floor=self.reaction_count)
-        gap = gap_for_rpm(rpm)
-        prompt = build_script_prompt_v2(
-            video["title"], video["desc"], video["up"], video["duration"],
-            subtitle_text, sampled, comment_texts, want, min_gap=gap,
-        )
-        raw = await _call_llm("你是陪看猫娘的脚本引擎。", prompt, self.llm_timeout)
-        reactions = normalize_reactions(raw, video["duration"], want, min_gap=gap)
-        if not reactions:
-            reactions = self._fallback_reactions(video["duration"], danmaku)
-            self.logger.warning("[watch_party] LLM 脚本不可用，降级弹幕高能点模式")
-        self.logger.info(
-            "[watch_party] 预习⑤陪看脚本 {} 条（时长 {}s，密度 {}/分钟 → 目标 {} 条，间隔≥{}s，共 {:.1f}s）",
-            len(reactions), video["duration"], rpm, want, int(gap), time.time() - t0,
-        )
         return {
             "video": video,
             "danmaku": danmaku,
             "subtitles": subtitles,
             "comments": comments,
-            "reactions": reactions,
-            "fired": [],
-            "start_epoch": time.time() if self.auto_begin else None,
-            "offset": 0.0,
-            "summarized": False,
-            "last_heartbeat": time.time(),
+            # 整片级背景参考（高频弹幕梗 + 热评），**不含任何时间点**
+            "material_ctx": build_material_overview(danmaku, comments),
         }
 
-    def _fallback_reactions(self, duration: int, danmaku: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """LLM 不可用时的兜底：在弹幕最密的几个点说"高能预警"式反应。"""
-        moments = self._top_moments_local(danmaku, top=min(5, self.reaction_count))
-        lines = [
-            ("震惊", "弹幕突然爆炸了！前面一定发生了什么喵！"),
-            ("好奇", "这一段弹幕刷得飞起，本喵也紧张起来了喵…"),
-            ("吐槽", "密集弹幕预警！这段绝对是名场面喵。"),
-            ("笑", "弹幕都在哈哈哈，到底有什么好笑的喵？！"),
-            ("燃", "弹幕密度拉满了，燃起来了喵！！"),
-        ]
-        reactions = []
-        for idx, moment in enumerate(moments):
-            emotion, text = lines[idx % len(lines)]
-            reactions.append({"at": max(3, moment["at"]), "emotion": emotion, "text": text, "quote": ""})
-        return reactions
+    def _ensure_timeline(self) -> TimelineDB:
+        """懒加载本地时间轴库（仅在开着预学习时才写入，供以后复用）。"""
+        if self._timeline is None:
+            db_path = Path(self.data_path()) / "timeline.db"
+            self._timeline = TimelineDB(str(db_path))
+            self.logger.info("[watch_party] 时间轴库就绪：{}", db_path)
+        return self._timeline
 
-    @staticmethod
-    def _top_moments_local(danmaku: list[dict[str, Any]], top: int = 3) -> list[dict[str, Any]]:
-        from ._watch_logic import top_moments
+    def _material_context(self) -> str:
+        """当前可用素材背景（整片级、无时间点）；没做预学习就返回空串。"""
+        session = self._session
+        if not session:
+            return ""
+        return str(session.get("material_ctx") or "")
 
-        return top_moments(danmaku, top=top)
-
-    # ── 时间轴调度 ─────────────────────────────────────────────
+    # ── 调度：开关 + 双档位截屏节奏（全程无进度概念）─────────────
     def _tick_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -506,101 +541,128 @@ class WatchPartyPlugin(NekoPluginBase):
             self._wake_event.clear()
             if self._stop_event.is_set():
                 break
-            self._wake_event.wait(timeout=max(1.0, self.poll_interval))
+            # 睡到"下一件该做的事"可能发生的时间点，保证频率自定义立即生效
+            self._wake_event.wait(timeout=self._next_wait())
         self.logger.info("[watch_party] 调度线程退出")
 
-    def _current_position(self, session: dict[str, Any]) -> float:
-        if session.get("start_epoch") is None:
-            return float(session.get("offset", 0.0))
-        return time.time() - float(session["start_epoch"]) + float(session.get("offset", 0.0))
+    def _next_wait(self) -> float:
+        """按当前开关状态算出下一次醒来前该睡多久（秒）。"""
+        if self._watching:
+            interval = float(self.shot_interval_active)
+            elapsed = time.time() - self._last_comment_ts
+        else:
+            interval = float(self.shot_interval_idle)
+            elapsed = time.time() - self._last_probe_ts
+        return max(1.0, min(30.0, interval - elapsed))
 
     def _tick_once(self) -> None:
-        session = self._session
-        if not session or session.get("start_epoch") is None:
+        # 开关打开：高频截屏，看到画面就自主评论
+        if self._watching:
+            if time.time() - self._last_comment_ts < float(self.shot_interval_active):
+                return
+            self._comment_on_screen()
             return
-        position = self._current_position(session)
-        video = session["video"]
-        fired_ids = {r["at"] for r in session["fired"]}
 
-        # 提前量：推送到聊天后猫娘开口需要几秒，提前触发刚好卡在画面节点上
-        lead = self.reaction_lead_seconds
-        for reaction in session["reactions"]:
-            if reaction["at"] in fired_ids or reaction["at"] > position + lead:
-                continue
-            session["fired"].append(reaction)
-            fired_ids.add(reaction["at"])
-            text = format_reaction(reaction, reaction["at"])
-            # 预习脚本必须服从实时画面：看得见时以画面描述为准、脚本情绪只做辅助；
-            # 看不见时如实说明，绝不拿预习稿冒充"看过画面"。
-            if self.screen_assist and self.screen_on_react:
-                seen = self._describe_sync(frame=self._grab_player_frame())
-                minutes, seconds = divmod(int(reaction["at"]), 60)
-                if seen.get("ok") and seen.get("text"):
-                    emoji = {"笑": "😂", "感动": "🥹", "同情": "🫂", "震惊": "😱", "吐槽": "😤",
-                             "好奇": "🤔", "心疼": "🥺", "燃": "🔥"}.get(reaction.get("emotion", ""), "🐱")
-                    seen_text = seen["text"].replace(chr(10), " ")[:60]
-                    tag = "看" if seen.get("source") == "vision" else "瞄"
-                    text = f"{emoji} [{minutes:02d}:{seconds:02d}] 本喵{tag}了一眼，画面上是「{seen_text}」，{reaction.get('text', '')[:24]}喵"
-                else:
-                    self.logger.info("[watch_party] 看画面失败：{}", seen.get("error"))
-                    text = (f"😿 [{minutes:02d}:{seconds:02d}] 本喵这会儿没看到画面，"
-                            f"只能照着预习笔记念一句：{reaction.get('text', '')[:24]}喵")
-            self._push(text)
+        # 开关关闭：低频探测要不要自动打开（面板可关掉 auto_detect）
+        if not (self.auto_detect and self.screen_assist):
+            return
+        if time.time() - self._last_probe_ts < float(self.shot_interval_idle):
+            return
+        self._last_probe_ts = time.time()
+        if self._probe_playing():
+            self._turn_on_watch(auto=True)
 
-        # 同步播放窗口：直接读 video.currentTime（毫秒级真实进度，最高优先级）
-        if session.get("player_window") and self._pwindow is not None:
-            real = self._pwindow.position(timeout=3.0)
-            if real is not None:
-                if abs(real - position) >= 1.0:
-                    with self._lock:
-                        session["offset"] += real - position
-                position = real
-            elif self._pwindow.is_alive() is False:
-                session["player_window"] = False
-                self._push("同步播放窗口关掉了喵，回到手动校准模式（「跳到 X 分」还能用）")
+    def _probe_playing(self) -> bool:
+        """探测主人现在是否在看视频：视觉模型探针优先，OCR 关键词兜底。"""
+        seen = self._describe_sync(frame=self._grab_player_frame(), prompt=PLAYING_PROBE_PROMPT)
+        if seen.get("ok") and seen.get("text"):
+            text = str(seen.get("text") or "")
+            if seen.get("source") == "ocr":
+                return looks_like_video_ui(text)
+            return parse_playing_answer(text)
+        try:
+            shot = capture_screen_text()
+        except Exception as exc:
+            self.logger.info("[watch_party] 待机探测失败：{}", exc)
+            return False
+        if shot.get("ok"):
+            return looks_like_video_ui(str(shot.get("text") or ""))
+        return False
 
-        # 自发碎碎念：每 N 分钟结合台词/弹幕表达一次看法（不是干巴巴的进度条）
-        if (
-            self.heartbeat_minutes > 0
-            and time.time() - float(session.get("last_heartbeat", time.time())) >= self.heartbeat_minutes * 60
-        ):
-            session["last_heartbeat"] = time.time()
-            minutes, seconds = divmod(int(position), 60)
-            # 自动对齐：截屏读播放器进度条（偏差 ≥30 秒才修正）
-            aligned_note = ""
-            if self.screen_assist and self.auto_align:
-                aligned, aligned_note = self._auto_align(position)
-                if aligned is not None:
-                    position = aligned
-            recent_fired = [r for r in session["fired"] if abs(r["at"] - position) <= 45]
-            if not recent_fired:
-                remark = spontaneous_remark(
-                    session.get("subtitles", []), session.get("danmaku", []),
-                    position, video.get("title", ""), seed=f"{video.get('bvid')}|{int(position)}",
-                    comments=session.get("comments") or [],
-                    rotate=int(session.get("rotate", 0)),
+    def _turn_on_watch(self, auto: bool = False) -> None:
+        """打开陪看开关：清空本轮话术、立刻来一发。"""
+        if self._watching:
+            return
+        self._watching = True
+        self._said = []
+        self._recent = []
+        self._last_comment_ts = 0.0
+        self._wake_event.set()
+        if auto:
+            self._push(f"咦，本喵截屏瞄到{self.master_name}在看视频喵～自己凑过来一起看啦！")
+        self.logger.info("[watch_party] 陪看开关打开（{}）", "自动探测" if auto else "主人开启")
+
+    def _turn_off_watch(self) -> None:
+        if not self._watching:
+            return
+        self._watching = False
+        self._last_probe_ts = time.time()
+        self._wake_event.set()
+        self.logger.info("[watch_party] 陪看开关关闭")
+
+    def _comment_on_screen(self) -> None:
+        """截一帧主人正在看的画面，看到内容才让猫娘**主动**说一句；看不到就安静。
+
+        这是陪看**唯一**的发言路径：没有预习稿、不按时间轴念稿、不提任何时间点。
+        可选预学习素材只作为"整片级背景"帮猫娘认出画面里看不清的梗与笑点。
+        """
+        if not self.screen_assist:
+            self._last_comment_ts = time.time()
+            return
+
+        seen = self._describe_sync(frame=self._grab_player_frame())
+        self._last_comment_ts = time.time()
+        if not (seen.get("ok") and seen.get("text")):
+            self.logger.info("[watch_party] 这一轮没看到画面（{}），保持安静", seen.get("error"))
+            return
+
+        session = self._session
+        video = (session or {}).get("video") or {}
+        title = str(video.get("title") or "") or f"{self.master_name}正在看的视频"
+        prompt = build_screen_reaction_prompt(
+            title=title,
+            screen_text=str(seen.get("text") or ""),
+            timeline_ctx=self._material_context(),
+            catgirl_name=self.catgirl_name,
+            master_name=self.master_name,
+            recent=list(self._recent),
+            source=str(seen.get("source") or "vision"),
+        )
+        try:
+            raw = asyncio.run(
+                _call_llm(
+                    "你是陪看的猫娘，只对看到的画面做真实反应，看不到就别硬说，别报时间进度。",
+                    prompt, self.llm_timeout,
                 )
-                session["rotate"] = int(session.get("rotate", 0)) + 1
-                if self.screen_assist:
-                    seen = self._describe_sync(frame=self._grab_player_frame())
-                    if seen.get("ok") and seen.get("text"):
-                        remark += f"（瞄到你画面上有「{seen['text'].replace(chr(10), ' ')[:30]}」喵）"
-                self._push(f"💬 {minutes}分{seconds:02d}：{remark}")
-            else:
-                from ._watch_logic import fmt_pos
+            )
+        except SdkError as exc:
+            self.logger.warning("[watch_party] 看屏反应生成失败：{}", exc)
+            return
+        except Exception as exc:
+            self.logger.exception("[watch_party] 看屏反应异常：{}", exc)
+            return
 
-                self._push(f"⏱ 陪看中喵～放到 {fmt_pos(int(position))}，要校准就说「跳到 X 分」")
+        reaction = parse_screen_reaction(raw)
+        if not reaction:
+            self.logger.info("[watch_party] 模型没给出可用反应，本轮跳过")
+            return
 
-        # 播完自动总结
-        if (
-            self.auto_summary
-            and not session.get("summarized")
-            and position >= video["duration"] + 15
-        ):
-            session["summarized"] = True
-            summary = build_summary(video, session["danmaku"], session["fired"], [c["text"] for c in session["comments"]])
-            self._push(summary)
-            self.logger.info("[watch_party] 播放完毕，自动总结已推送")
+        self._said.append(reaction)
+        self._recent.append(reaction["text"])
+        del self._recent[:-5]
+        seen_text = str(seen.get("text") or "").replace(chr(10), " ")[:40]
+        tag = "看" if seen.get("source") == "vision" else "瞄"
+        self._push(f"{format_reaction(reaction)}（本喵{tag}了一眼，画面上是「{seen_text}」）")
 
     def _push(self, text: str) -> None:
         try:
@@ -719,55 +781,72 @@ class WatchPartyPlugin(NekoPluginBase):
 
     # ── 管理面板 ───────────────────────────────────────────────
     def _panel_status(self, _body: dict[str, Any]) -> dict[str, Any]:
+        """面板状态：**只暴露开关与截屏节奏**，没有任何播放进度。"""
         session = self._session
-        player_alive = bool(self._pwindow is not None and self._pwindow.is_alive())
-        if not session:
-            return {
-                "watching": False, "prepared": False,
-                "screen_assist": self.screen_assist,
-                "screen_vision": self.screen_vision,
-                "sessdata_set": bool(self.bili_sessdata),
-                "player_alive": player_alive,
-            }
-        video = session["video"]
-        watching = session.get("start_epoch") is not None
-        position = self._current_position(session) if watching else float(session.get("offset", 0))
+        video = (session or {}).get("video") or {}
         return {
-            "watching": watching, "prepared": True,
-            "title": video.get("title", ""), "bvid": video.get("bvid", ""),
-            "duration": video.get("duration", 0),
-            "position": int(position),
-            "fired": len(session["fired"]), "total": len(session["reactions"]),
+            "watching": self._watching,
+            "prepared": bool(session),
+            "title": video.get("title", ""),
+            "bvid": video.get("bvid", ""),
+            "said": len(self._said),
+            "shot_interval_active": self.shot_interval_active,
+            "shot_interval_idle": self.shot_interval_idle,
+            "auto_detect": self.auto_detect,
+            "prelearn": self.prelearn,
             "screen_assist": self.screen_assist,
             "screen_vision": self.screen_vision,
             "vision_model": self.vision_model or "宿主 vision 通道",
-            "reactions_per_minute": self.reactions_per_minute,
             "sessdata_set": bool(self.bili_sessdata),
-            "player_alive": player_alive,
+            "player_alive": bool(self._pwindow is not None and self._pwindow.is_alive()),
         }
 
     def _panel_stop(self, _body: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            session = self._session
-            self._session = None
-        if not session:
+        self._turn_off_watch()
+        session = self._session
+        if not session and not self._said:
             return {"ok": True, "message": "本来就没在看喵"}
-        summary = build_summary(session["video"], session["danmaku"], session["fired"], [c["text"] for c in session["comments"]])
+        summary = build_summary(
+            (session or {}).get("video") or {},
+            (session or {}).get("danmaku") or [],
+            self._said,
+            [str(c.get("text") or "") for c in ((session or {}).get("comments") or [])],
+        )
+        self._said = []
         self._push("好呀，先停在这里喵。" + chr(10) + summary)
         return {"ok": True}
 
     def _panel_config(self, body: dict[str, Any]) -> dict[str, Any]:
-        if "rpm" in body:
-            self.reactions_per_minute = max(0.5, min(10.0, float(body["rpm"])))
+        """面板自定义截屏频率与开关；只改传进来的字段，落盘 panel_state.json。"""
+        changed: dict[str, Any] = {}
+        if body.get("shot_interval_active") is not None:
+            self.shot_interval_active = _clamp_float(
+                body.get("shot_interval_active"), 5.0, 600.0, self.shot_interval_active
+            )
+            changed["shot_interval_active"] = self.shot_interval_active
+        if body.get("shot_interval_idle") is not None:
+            self.shot_interval_idle = _clamp_float(
+                body.get("shot_interval_idle"), 10.0, 3600.0, self.shot_interval_idle
+            )
+            changed["shot_interval_idle"] = self.shot_interval_idle
+        for key in ("auto_detect", "prelearn", "screen_assist", "screen_vision"):
+            if key in body:
+                value = _safe_bool(body.get(key), bool(getattr(self, key)))
+                setattr(self, key, value)
+                changed[key] = value
+        if changed:
             state_path = Path(self.data_path()) / "panel_state.json"
             try:
                 state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-                state["reactions_per_minute"] = self.reactions_per_minute
+                if not isinstance(state, dict):
+                    state = {}
+                state.update(changed)
                 state_path.parent.mkdir(parents=True, exist_ok=True)
                 state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
-        return {"ok": True, "rpm": self.reactions_per_minute}
+            self._wake_event.set()
+        return {"ok": True, **changed}
 
     def _panel_save_sessdata(self, body: dict[str, Any]) -> dict[str, Any]:
         value = str(body.get("sessdata") or "").strip()
@@ -795,17 +874,6 @@ class WatchPartyPlugin(NekoPluginBase):
         self.bili_sessdata = value
         self._persist_sessdata(value)
         return {"ok": True, "message": "已经拿到登录态啦喵，字幕功能可以用了！", "sessdata_set": True}
-
-    def _panel_jump(self, body: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            session = self._session
-            if not session or session.get("start_epoch") is None:
-                return {"ok": False, "error": "还没开始看喵"}
-            target = max(0.0, float(body.get("minute", 0)) * 60.0)
-            session["offset"] += target - self._current_position(session)
-            if self._pwindow is not None and self._pwindow.is_alive():
-                self._pwindow.seek(target)
-        return {"ok": True, "position": int(target)}
 
     def _start_panel_loop(self) -> None:
         """面板专用的常驻事件循环（独立线程）。
@@ -843,6 +911,14 @@ class WatchPartyPlugin(NekoPluginBase):
     def _panel_react(self, _body: dict[str, Any]) -> dict[str, Any]:
         try:
             text = self._run_async(self._react_now(), timeout=60)
+            return {"ok": True, "message": text}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _panel_begin(self, _body: dict[str, Any]) -> dict[str, Any]:
+        """面板开关：打开陪看（无需先预学习视频，只认截屏画面）。"""
+        try:
+            text = self._run_async(self._begin(), timeout=30)
             return {"ok": True, "message": text}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -885,8 +961,8 @@ class WatchPartyPlugin(NekoPluginBase):
         endpoints = {
             ("GET", "/api/status"): self._panel_status,
             ("POST", "/api/stop"): self._panel_stop,
-            ("POST", "/api/jump"): self._panel_jump,
             ("POST", "/api/start"): self._panel_start_watch,
+            ("POST", "/api/begin"): self._panel_begin,
             ("POST", "/api/react"): self._panel_react,
             ("POST", "/api/config"): self._panel_config,
             ("POST", "/api/sessdata"): self._panel_save_sessdata,
@@ -917,69 +993,33 @@ class WatchPartyPlugin(NekoPluginBase):
             self._session = session
         video = session["video"]
         intro = format_video_intro(video, len(session["danmaku"]), len(session["comments"]), self.catgirl_name)
-        if session.get("cold"):
-            tip = "这个视频弹幕评论都很少喵，本喵只能靠标题「盲看」。"
-            if not self.screen_assist:
-                tip += "建议开启截屏辅助（配置 screen_assist=true），本喵就能看着画面陪你看了喵！"
-            intro += f"\nℹ️ {tip}"
-        if session["reactions"]:
-            preview = session["reactions"][0]
-            intro += f"\n（预习到 {len(session['reactions'])} 个想跟你吐槽的点，第一个在 {preview['at'] // 60}分{preview['at'] % 60:02d}秒喵）"
+        if self.prelearn:
+            intro += (
+                "\n（预学习素材已经存进本地素材库喵，只帮本喵看懂画面里看不清的梗；"
+                "本喵不念稿、不报进度，只有截屏看到你正在放的画面才会开口）"
+            )
+        else:
+            intro += "\n（预学习没开喵，本喵不抓弹幕/字幕/热评，纯靠截屏看画面聊；想开可以在面板里打开）"
+        if not self.screen_assist:
+            intro += "\nℹ️ 现在没开截屏辅助，本喵看不到画面就说不出话；想一起吐槽请在面板里把「截屏辅助」打开喵。"
         return intro
 
     async def _begin(self) -> str:
+        """打开陪看开关：之后按 shot_interval_active 高频截屏自主评论。
+
+        开关也可以由猫娘**自动**打开（截屏探测到主人在看视频时），
+        所以这里允许还没有预学习会话——那时只认画面，不认素材。
+        """
+        await self._ensure_config_loaded()
         with self._lock:
             session = self._session
-            if not session:
-                raise SdkError("还没有要陪看的视频喵，先发我链接或 BV 号。")
-            session["start_epoch"] = time.time()
-            video = dict(session["video"])
-        return f"本喵搬好小板凳了喵！从现在开始一起看《{video['title']}》，暂停了就跟本喵说跳到几分几秒～"
-
-    async def _jump(self, minute: float) -> str:
-        with self._lock:
-            session = self._session
-            if not session or session.get("start_epoch") is None:
-                raise SdkError("还没有开始看喵，先说开始陪看。")
-            target = max(0.0, minute * 60.0)
-            session["offset"] += target - self._current_position(session)
-        return f"好喵，本喵把进度条拽到 {int(minute)} 分了，跟上了！"
-
-    def _auto_align(self, current_position: float) -> tuple[Optional[float], str]:
-        """截屏读取播放器进度条，自动对齐时间轴（偏差 ≥30 秒才修正）。"""
-        try:
-            ok, frame = capture_frame()
-            if not ok:
-                return None, f"截屏失败：{frame}"
-            ok2, items = ocr_frame(frame, keep_boxes=True)
-        except Exception as exc:
-            return None, f"截屏失败：{exc}"
-        if not ok2:
-            return None, str(items)[:60]
-        if not isinstance(items, list):
-            return None, "OCR 无位置信息"
-        info = (self._session or {}).get("video", {}) if self._session else {}
-        duration = int(info.get("duration") or 0)
-        got = extract_playback_time(items, screen_h=1080)
-        if not got or got.get("total", 0) <= 0:
-            return None, "画面上没读到进度条时间"
-        if duration and abs(got["total"] - duration) > 90:
-            return None, f"进度条总时长 {got['total']}s 与视频 {duration}s 不符，跳过"
-        drift = got["position"] - current_position
-        if abs(drift) < 30:
-            return None, "偏差不足 30 秒"
-        with self._lock:
-            session = self._session
-            if not session or session.get("start_epoch") is None:
-                return None, "会话已结束"
-            session["offset"] += got["position"] - current_position
-        self.logger.info(
-            "[watch_party] 自动对齐：{}s → {}s（偏差 {:+d}s）",
-            int(current_position), got["position"], int(drift),
-        )
-        from ._watch_logic import fmt_pos
-
-        return float(got["position"]), f"已自动对齐到 {fmt_pos(got['position'])} 喵"
+            title = str(((session or {}).get("video") or {}).get("title") or "")
+        self._turn_on_watch(auto=False)
+        if not self.screen_assist:
+            return "好喵，开关打开啦——不过截屏辅助没开，本喵看不到画面就开不了口喵，先去面板把「截屏辅助」打开吧。"
+        if title:
+            return f"本喵搬好小板凳啦喵！从现在开始一起看《{title}》，本喵自己盯着屏幕，看到好笑的就吐槽～"
+        return "本喵搬好小板凳啦喵！从现在开始盯着屏幕陪你看，看到好笑的就吐槽～"
 
     async def _read_comments(self) -> str:
         await self._ensure_config_loaded()
@@ -998,52 +1038,59 @@ class WatchPartyPlugin(NekoPluginBase):
         return text
 
     async def _react_now(self) -> str:
-        with self._lock:
-            session = self._session
-            if not session:
-                raise SdkError("还没有要陪看的视频喵。")
-            position = self._current_position(session)
-            window = [d for d in session["danmaku"] if abs(d["t"] - position) <= 15]
-            fired_ids = {r["at"] for r in session["fired"]}
-            upcoming = [r for r in session["reactions"] if r["at"] not in fired_ids and r["at"] >= position - 5]
-        screen_ctx = ""
-        if self.screen_assist and self.screen_on_react:
-            seen = await self._describe_screen(frame=self._grab_player_frame())
-            if seen.get("ok") and seen.get("text"):
-                screen_ctx = build_screen_context(seen["text"])
-                self.logger.info("[watch_party] 看画面({})：{} 字", seen.get("source"), len(seen["text"]))
-            else:
-                self.logger.info("[watch_party] 看画面不可用: {}", seen.get("error"))
-        subs = session.get("subtitles") or []
-        near_subs = subtitle_window(subs, position) if subs else []
-        if screen_ctx:
-            parts = [f"本喵瞄了一眼你的屏幕喵：{screen_ctx}"]
-            if near_subs:
-                parts.append(f"台词正说到「{near_subs[0]['text'][:40]}」")
-            return "；".join(parts) + "，所以这到底在放什么喵？！"
-        if near_subs:
-            line = near_subs[len(near_subs) // 2]["text"]
-            return f"台词正说到「{line[:40]}」喵，本喵听得很认真！"
-        if window:
-            burst = random.choice(window)["text"]
-            return f"{random.choice(('好奇', '吐槽'))} 咦，这附近弹幕都在说「{burst[:30]}」喵！"
-        if upcoming:
-            nearest = upcoming[0]
-            return f"{format_reaction(nearest, nearest['at'])}"
-        return "这一段风平浪静喵，弹幕都在憋大招呢…"
+        """手动来一发：立刻看一眼当前画面并吐槽（不依赖任何进度/时间点）。"""
+        session = self._session
+        video = (session or {}).get("video") or {}
+        title = str(video.get("title") or "") or f"{self.master_name}正在看的视频"
+        seen = await self._describe_screen(frame=self._grab_player_frame())
+        if not (seen.get("ok") and seen.get("text")):
+            self.logger.info("[watch_party] 手动反应没看到画面: {}", seen.get("error"))
+            raise SdkError("本喵这会儿没看到你的画面喵，把视频窗口露出来再喊我一次～")
+        self.logger.info("[watch_party] 手动看图({})：{} 字", seen.get("source"), len(seen["text"]))
+        prompt = build_screen_reaction_prompt(
+            title=title,
+            screen_text=str(seen.get("text") or ""),
+            timeline_ctx=self._material_context(),
+            catgirl_name=self.catgirl_name,
+            master_name=self.master_name,
+            recent=list(self._recent),
+            source=str(seen.get("source") or "vision"),
+        )
+        try:
+            raw = await _call_llm(
+                "你是陪看的猫娘，只对看到的画面做真实反应，看不到就别硬说，别报时间进度。",
+                prompt, self.llm_timeout,
+            )
+        except SdkError:
+            raise
+        except Exception as exc:
+            raise SdkError(f"本喵看画面想词的时候卡住了喵：{exc}")
+        reaction = parse_screen_reaction(raw)
+        if not reaction:
+            raise SdkError("本喵看着画面憋了半天没想出话来喵…再等一下下？")
+        self._said.append(reaction)
+        self._recent.append(reaction["text"])
+        del self._recent[:-5]
+        self._last_comment_ts = time.time()
+        return format_reaction(reaction)
 
     async def _stop(self) -> str:
-        with self._lock:
-            session = self._session
-            self._session = None
-        if not session:
+        self._turn_off_watch()
+        session = self._session
+        if not session and not self._said:
             return "本来就没在看喵～"
-        summary = build_summary(session["video"], session["danmaku"], session["fired"], [c["text"] for c in session["comments"]])
+        summary = build_summary(
+            (session or {}).get("video") or {},
+            (session or {}).get("danmaku") or [],
+            self._said,
+            [str(c.get("text") or "") for c in ((session or {}).get("comments") or [])],
+        )
+        self._said = []
         return f"好呀，先停在这里喵。\n{summary}"
 
     @llm_tool(
         name="neko_watch_party",
-        description="让猫娘陪用户看B站视频：传入视频链接或BV号，猫娘会预习视频、读取弹幕与热评，按播放进度表达笑/感动/同情/震惊等情绪反馈。",
+        description="让猫娘陪用户看B站视频：传入视频链接或BV号，猫娘会把弹幕/字幕/热评存入本地素材库；陪看时截屏看用户正在播放的画面，看到什么才吐槽什么，看不到就安静陪着。",
         parameters={
             "type": "object",
             "properties": {
@@ -1057,7 +1104,7 @@ class WatchPartyPlugin(NekoPluginBase):
     @plugin_entry(
         id="start_watch",
         name="陪我看B站",
-        description="让猫娘预习B站视频（链接/BV号）并生成陪看脚本；begin_now=true 时立即开始同步陪看。",
+        description="让猫娘抓取B站视频（链接/BV号）的弹幕、字幕、热评存入本地素材库并开始陪看；begin_now=true 时立即开始看屏陪看。",
         input_schema={
             "type": "object",
             "properties": {
@@ -1087,8 +1134,8 @@ class WatchPartyPlugin(NekoPluginBase):
 
     @plugin_entry(
         id="begin_watch",
-        name="开始陪看",
-        description="开始同步陪看（按时间轴推送猫娘的反应）。",
+        name="陪我看（打开开关）",
+        description="打开陪看开关：猫娘随后按截屏节奏**自主**高频截屏看画面并主动评论、抓笑点接梗；看不到画面就安静等着。",
         input_schema={"type": "object", "properties": {}},
     )
     async def begin_watch_entry(self, **_):
@@ -1099,26 +1146,9 @@ class WatchPartyPlugin(NekoPluginBase):
             return Err(exc)
 
     @plugin_entry(
-        id="jump_to",
-        name="校准进度",
-        description="校准陪看进度：minute=用户当前看到第几分钟。",
-        input_schema={
-            "type": "object",
-            "properties": {"minute": {"type": "number", "description": "当前看到第几分钟"}},
-            "required": ["minute"],
-        },
-    )
-    async def jump_to_entry(self, minute: float = 0, **_):
-        await self._ensure_config_loaded()
-        try:
-            return Ok(await self._jump(float(minute)))
-        except SdkError as exc:
-            return Err(exc)
-
-    @plugin_entry(
         id="react_now",
-        name="聊聊刚才那段",
-        description="猫娘针对当前播放位置附近的弹幕现场反应。",
+        name="聊聊现在这画面",
+        description="让猫娘立刻看一眼当前画面并现场吐槽（看不到画面会直接说看不到）。",
         input_schema={"type": "object", "properties": {}},
     )
     async def react_now_entry(self, **_):
@@ -1172,14 +1202,15 @@ class WatchPartyPlugin(NekoPluginBase):
     async def status_entry(self, **_):
         await self._ensure_config_loaded()
         session = self._session
-        if not session:
-            return Ok("现在没有在陪看喵。发我B站链接或 BV 号就可以开始～")
-        video = session["video"]
-        watching = session.get("start_epoch") is not None
-        position = self._current_position(session)
-        return Ok(
-            f"🐱 陪看中：{'▶️ 进行中' if watching else '⏸️ 已预习未开始'}\n"
-            f"- 《{video['title']}》（{video['bvid']}）\n"
-            f"- 进度：{int(position) // 60}分{int(position) % 60:02d}秒 / {video['duration'] // 60}分{video['duration'] % 60:02d}秒\n"
-            f"- 反应点：{len(session['fired'])}/{len(session['reactions'])} 已触发"
-        )
+        video = (session or {}).get("video") or {}
+        lines = [
+            f"🐱 陪看开关：{'▶️ 已打开（高频自主截屏中）' if self._watching else '⏸️ 关闭'}",
+            f"- 截屏节奏：在看时每 {self.shot_interval_active:.0f} 秒 / 待机每 {self.shot_interval_idle:.0f} 秒",
+            f"- 自动探测：{'开' if self.auto_detect else '关'}｜预学习：{'开' if self.prelearn else '关'}｜截屏辅助：{'开' if self.screen_assist else '关'}",
+        ]
+        if video:
+            lines.append(f"- 当前视频：《{video.get('title', '')}》（{video.get('bvid', '')}）")
+        else:
+            lines.append("- 还没预学习任何视频喵，发我链接或 BV 号就能认得标题～")
+        lines.append(f"- 已自主吐槽 {len(self._said)} 句")
+        return Ok("\n".join(lines))

@@ -5,21 +5,18 @@ enabled = true
 auto_start = false
 
 [neko_watch_party]
-reaction_count = 10
-# 反应密度：每分钟几条（1-10，面板里可改，下次预习生效）
-reactions_per_minute = 3
-# 预习完成后自动开始同步陪看（true=一步式；false=等用户说"开始看"）
-auto_begin = true
-# 陪看心跳：每 N 分钟轻推一句进度（0=关闭）
-heartbeat_minutes = 3
-# 反应密度随时长自适应（每 45 秒一个反应点，上限 60）
-auto_density = true
+# 陪看开关打开（在看视频）时的截屏节奏：每多少秒截一帧看画面并自主评论（5-600，面板可改）
+shot_interval_active = 20
+# 开关关闭时的待机探测节奏：每多少秒截一帧判断主人在不在看视频（10-3600，面板可改）
+shot_interval_idle = 120
+# 自动探测：待机时低频截屏，发现主人在看视频就自动打开陪看开关（面板可关）
+auto_detect = true
+# 预学习（可选辅助）：开才抓弹幕/字幕/热评存本地素材，用来理解画面里的梗；不开也能陪看
+prelearn = false
 # B站 SESSDATA（浏览器 F12 复制，填了可解锁字幕模式；留空用弹幕模式）
 bili_sessdata = ""
-# 截屏辅助：截取画面让猫娘"看见"内容（默认关；隐私敏感请保持关闭）
-screen_assist = false
-# 开启截屏辅助时，"刚才那段"是否截屏（否则只用心跳时的截图）
-screen_on_react = true
+# 截屏看片：截取画面让猫娘"看见"内容，看到才评论（隐私敏感可关；关了基本不说话）
+screen_assist = true
 # 看片用多模态视觉模型（true=视觉模型描述画面；失败自动降级本地 OCR）
 screen_vision = true
 # 视觉模型超时（秒）
@@ -30,10 +27,6 @@ vision_model = ""
 vision_base_url = ""
 vision_api_key = ""
 vision_provider_type = ""
-# 自动对齐：心跳时截屏读播放器进度条自动校准（需先开 screen_assist）
-auto_align = true
-# 反应提前量（秒）：推送后猫娘开口有几秒延迟，提前触发刚好卡在画面节点
-reaction_lead_seconds = 4
 request_timeout = 15
 llm_timeout = 45
 poll_interval = 2
