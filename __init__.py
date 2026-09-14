@@ -33,7 +33,15 @@ from plugin.sdk.plugin import (
 from ._panel import PanelServer, find_open_port
 from ._player_window import PlayerWindow
 from ._bili_data import fetch_subtitles, fetch_via_page, subtitle_window, subtitles_to_text
-from ._screen import capture_frame, capture_screen_text, ocr_frame, build_screen_context, extract_playback_time
+from ._screen import (
+    build_screen_context,
+    capture_frame,
+    capture_screen_text,
+    describe_frame,
+    describe_screen,
+    extract_playback_time,
+    ocr_frame,
+)
 from ._watch_logic import (
     build_cold_script_prompt,
     build_script_prompt_v2,
@@ -193,6 +201,12 @@ class WatchPartyPlugin(NekoPluginBase):
         self.bili_sessdata: str = ""
         self.screen_assist: bool = False
         self.screen_on_react: bool = True
+        self.screen_vision: bool = True
+        self.vision_timeout: float = 25.0
+        self.vision_model: str = ""
+        self.vision_base_url: str = ""
+        self.vision_api_key: str = ""
+        self.vision_provider_type: str = ""
         self.request_timeout: float = 15.0
         self.llm_timeout: float = 45.0
         self.poll_interval: float = 2.0
@@ -236,7 +250,13 @@ class WatchPartyPlugin(NekoPluginBase):
         self.screen_on_react = _safe_bool(section.get("screen_on_react"), True)
         self.auto_align = _safe_bool(section.get("auto_align"), True)
         self.reaction_lead_seconds = max(0.0, float(_safe_int(section.get("reaction_lead_seconds"), 4)))
-        self.reaction_lead_seconds: float = 4.0
+        # 视觉看片：优先用多模态模型描述画面，失败再降级本地 OCR
+        self.screen_vision = _safe_bool(section.get("screen_vision"), True)
+        self.vision_timeout = max(5.0, float(_safe_int(section.get("vision_timeout"), 25)))
+        self.vision_model = _safe_str(section.get("vision_model"))
+        self.vision_base_url = _safe_str(section.get("vision_base_url")).rstrip("/")
+        self.vision_api_key = _safe_str(section.get("vision_api_key"))
+        self.vision_provider_type = _safe_str(section.get("vision_provider_type"))
         self.catgirl_name = _safe_str(section.get("catgirl_name"), "猫娘") or "猫娘"
         self.master_name = _safe_str(section.get("master_name"), "主人") or "主人"
         self._config_loaded = True
@@ -405,11 +425,11 @@ class WatchPartyPlugin(NekoPluginBase):
         self.logger.info("[watch_party] 预习②弹幕 {} 条", len(danmaku))
         await asyncio.sleep(0.3)
 
-        # 字幕（时间轴台词）：配置了 SESSDATA 才拿得到；没有就跳过走弹幕模式
+        # 字幕（时间轴台词）：优先用同步播放窗口里已登录的会话（免 F12 手动复制），
+        # 其次用配置/面板保存的 SESSDATA；都没有就跳过走弹幕模式
+        sessdata = self.bili_sessdata or await asyncio.to_thread(self._sessdata_from_window)
         subtitles: list[dict[str, Any]] = []
-        cookie = ""
-        if self.bili_sessdata:
-            cookie = f"SESSDATA={self.bili_sessdata}"
+        cookie = f"SESSDATA={sessdata}" if sessdata else ""
         if video.get("bvid") and video.get("cid"):
             try:
                 subtitles = await asyncio.to_thread(
@@ -510,18 +530,21 @@ class WatchPartyPlugin(NekoPluginBase):
             session["fired"].append(reaction)
             fired_ids.add(reaction["at"])
             text = format_reaction(reaction, reaction["at"])
-            # 截屏辅助开启时：以实时画面为主参考（OCR 本地推理），脚本情绪做辅助
+            # 预习脚本必须服从实时画面：看得见时以画面描述为准、脚本情绪只做辅助；
+            # 看不见时如实说明，绝不拿预习稿冒充"看过画面"。
             if self.screen_assist and self.screen_on_react:
-                try:
-                    shot = capture_screen_text()
-                except Exception:
-                    shot = {"ok": False, "text": ""}
-                if shot.get("ok") and shot.get("text"):
+                seen = self._describe_sync(frame=self._grab_player_frame())
+                minutes, seconds = divmod(int(reaction["at"]), 60)
+                if seen.get("ok") and seen.get("text"):
                     emoji = {"笑": "😂", "感动": "🥹", "同情": "🫂", "震惊": "😱", "吐槽": "😤",
                              "好奇": "🤔", "心疼": "🥺", "燃": "🔥"}.get(reaction.get("emotion", ""), "🐱")
-                    minutes, seconds = divmod(int(reaction["at"]), 60)
-                    screen_text = shot["text"][:46]
-                    text = f"{emoji} [{minutes:02d}:{seconds:02d}] 画面上是「{screen_text}」，{reaction.get('text', '')[:24]}喵"
+                    seen_text = seen["text"].replace(chr(10), " ")[:60]
+                    tag = "看" if seen.get("source") == "vision" else "瞄"
+                    text = f"{emoji} [{minutes:02d}:{seconds:02d}] 本喵{tag}了一眼，画面上是「{seen_text}」，{reaction.get('text', '')[:24]}喵"
+                else:
+                    self.logger.info("[watch_party] 看画面失败：{}", seen.get("error"))
+                    text = (f"😿 [{minutes:02d}:{seconds:02d}] 本喵这会儿没看到画面，"
+                            f"只能照着预习笔记念一句：{reaction.get('text', '')[:24]}喵")
             self._push(text)
 
         # 同步播放窗口：直接读 video.currentTime（毫秒级真实进度，最高优先级）
@@ -559,9 +582,9 @@ class WatchPartyPlugin(NekoPluginBase):
                 )
                 session["rotate"] = int(session.get("rotate", 0)) + 1
                 if self.screen_assist:
-                    shot = capture_screen_text()
-                    if shot["ok"] and shot["text"]:
-                        remark += f"（瞄到你画面上有「{shot['text'][:26]}」喵）"
+                    seen = self._describe_sync(frame=self._grab_player_frame())
+                    if seen.get("ok") and seen.get("text"):
+                        remark += f"（瞄到你画面上有「{seen['text'].replace(chr(10), ' ')[:30]}」喵）"
                 self._push(f"💬 {minutes}分{seconds:02d}：{remark}")
             else:
                 from ._watch_logic import fmt_pos
@@ -592,11 +615,120 @@ class WatchPartyPlugin(NekoPluginBase):
         except Exception:
             self.logger.exception("[watch_party] push_message 失败")
 
+    # ── 看片：多模态视觉优先，本地 OCR 兜底 ─────────────────────
+    def _vision_override(self) -> dict[str, Any]:
+        """插件级视觉模型覆盖；四项留空则回退宿主 vision / conversation 通道。"""
+        return {
+            "vision_model": self.vision_model,
+            "vision_base_url": self.vision_base_url,
+            "vision_api_key": self.vision_api_key,
+            "vision_provider_type": self.vision_provider_type,
+        }
+
+    def _grab_player_frame(self) -> Any:
+        """优先从同步播放窗口抽帧（画面干净、无桌面隐私）；没有窗口返回 None 走主屏。"""
+        window = self._pwindow
+        if window is None or not window.is_alive():
+            return None
+        try:
+            return window.grab_frame(timeout=4.0)
+        except Exception:
+            return None
+
+    async def _describe_screen(self, frame: Any = None, prompt: str = "") -> dict[str, Any]:
+        """让猫娘"看"一帧：视觉模型优先，失败降级本地 OCR。
+
+        帧来源（两者都要）：优先传入的播放窗口抽帧，否则抓主屏。
+        返回 {"ok","text","source","error"}，source 为 vision/ocr。
+        """
+        last_err = ""
+        if self.screen_vision:
+            try:
+                if frame is not None:
+                    ok, text = await describe_frame(
+                        frame, prompt=prompt, override=self._vision_override(),
+                        timeout=self.vision_timeout,
+                    )
+                else:
+                    res = await describe_screen(
+                        prompt=prompt, override=self._vision_override(),
+                        timeout=self.vision_timeout,
+                    )
+                    ok = bool(res.get("ok"))
+                    text = str(res.get("text") or res.get("error") or "")
+                if ok and text:
+                    return {"ok": True, "text": text.strip(), "source": "vision", "error": ""}
+                last_err = text
+            except Exception as exc:
+                last_err = str(exc)
+        try:
+            shot = await asyncio.to_thread(capture_screen_text)
+        except Exception as exc:
+            return {"ok": False, "text": "", "source": "ocr", "error": last_err or str(exc)}
+        if shot.get("ok") and shot.get("text"):
+            return {"ok": True, "text": shot["text"], "source": "ocr", "error": ""}
+        return {"ok": False, "text": "", "source": "ocr", "error": last_err or str(shot.get("error") or "")}
+
+    def _describe_sync(self, frame: Any = None, prompt: str = "") -> dict[str, Any]:
+        """同步上下文（调度线程）里跑视觉描述。"""
+        try:
+            return asyncio.run(self._describe_screen(frame=frame, prompt=prompt))
+        except Exception as exc:
+            return {"ok": False, "text": "", "source": "vision", "error": str(exc)}
+
+    # ── B站登录态（窗口导出 / 手工粘贴共用一套落盘）────────────
+    def _browser_profile_dir(self) -> str:
+        """持久化浏览器用户目录：登录一次，之后长期复用。"""
+        path = Path(self.data_path()) / "browser_profile"
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return str(path)
+
+    def _persist_sessdata(self, value: str) -> None:
+        state_path = Path(self.data_path()) / "panel_state.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        except Exception:
+            state = {}
+        if value:
+            state["bili_sessdata"] = value
+        else:
+            state.pop("bili_sessdata", None)
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _sessdata_from_window(self) -> str:
+        """从同步播放窗口导出登录态（httpOnly 也拿得到），拿到就落盘复用。"""
+        window = self._pwindow
+        if window is None or not window.is_alive():
+            return ""
+        try:
+            value = window.sessdata(timeout=4.0)
+        except Exception:
+            return ""
+        if value:
+            self.bili_sessdata = value
+            self._persist_sessdata(value)
+            self.logger.info("[watch_party] 已从播放窗口导出登录态（字幕模式可用）")
+        return value
+
     # ── 管理面板 ───────────────────────────────────────────────
     def _panel_status(self, _body: dict[str, Any]) -> dict[str, Any]:
         session = self._session
+        player_alive = bool(self._pwindow is not None and self._pwindow.is_alive())
         if not session:
-            return {"watching": False, "prepared": False}
+            return {
+                "watching": False, "prepared": False,
+                "screen_assist": self.screen_assist,
+                "screen_vision": self.screen_vision,
+                "sessdata_set": bool(self.bili_sessdata),
+                "player_alive": player_alive,
+            }
         video = session["video"]
         watching = session.get("start_epoch") is not None
         position = self._current_position(session) if watching else float(session.get("offset", 0))
@@ -607,8 +739,11 @@ class WatchPartyPlugin(NekoPluginBase):
             "position": int(position),
             "fired": len(session["fired"]), "total": len(session["reactions"]),
             "screen_assist": self.screen_assist,
+            "screen_vision": self.screen_vision,
+            "vision_model": self.vision_model or "宿主 vision 通道",
             "reactions_per_minute": self.reactions_per_minute,
             "sessdata_set": bool(self.bili_sessdata),
+            "player_alive": player_alive,
         }
 
     def _panel_stop(self, _body: dict[str, Any]) -> dict[str, Any]:
@@ -636,23 +771,30 @@ class WatchPartyPlugin(NekoPluginBase):
 
     def _panel_save_sessdata(self, body: dict[str, Any]) -> dict[str, Any]:
         value = str(body.get("sessdata") or "").strip()
-        state_path = Path(self.data_path()) / "panel_state.json"
+        self.bili_sessdata = value
+        self._persist_sessdata(value)
+        return {"ok": True, "sessdata_set": bool(value)}
+
+    def _panel_open_login(self, _body: dict[str, Any]) -> dict[str, Any]:
+        """打开B站登录窗口（持久化上下文）：登录一次，之后自动复用。"""
+        if self._pwindow is None:
+            self._pwindow = PlayerWindow(self._browser_profile_dir())
+        ok, msg = self._pwindow.open_login(timeout=45)
+        return {"ok": ok, "message": msg, "error": None if ok else msg}
+
+    def _panel_read_sessdata(self, _body: dict[str, Any]) -> dict[str, Any]:
+        """从登录窗口导出 SESSDATA 并落盘，喂给字幕接口。"""
+        if self._pwindow is None or not self._pwindow.is_alive():
+            return {"ok": False, "error": "登录窗口还没开喵，先点「登录 B 站」"}
         try:
-            state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-        except Exception:
-            state = {}
-        if value:
-            self.bili_sessdata = value
-            state["bili_sessdata"] = value
-        else:
-            self.bili_sessdata = ""
-            state.pop("bili_sessdata", None)
-        try:
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-        return {"ok": True, "sessdata_set": bool(self.bili_sessdata)}
+            value = self._pwindow.sessdata(timeout=6.0)
+        except Exception as exc:
+            return {"ok": False, "error": f"读取登录态失败：{exc}"}
+        if not value:
+            return {"ok": False, "error": "窗口里还没读到登录态喵，先在窗口里把B站登录成功再试"}
+        self.bili_sessdata = value
+        self._persist_sessdata(value)
+        return {"ok": True, "message": "已经拿到登录态啦喵，字幕功能可以用了！", "sessdata_set": True}
 
     def _panel_jump(self, body: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -718,11 +860,13 @@ class WatchPartyPlugin(NekoPluginBase):
         if not bvid:
             return {"ok": False, "error": "还没有陪看的视频喵（先开始一次陪看）"}
         if self._pwindow is None:
-            self._pwindow = PlayerWindow()
+            self._pwindow = PlayerWindow(self._browser_profile_dir())
         ok, msg = self._pwindow.open(bvid, timeout=45)
         if ok and session is not None:
             with self._lock:
                 session["player_window"] = True
+        if ok and not self.bili_sessdata:
+            self._sessdata_from_window()
         return {"ok": ok, "message": msg, "error": None if ok else msg}
 
     def _panel_close_player(self, _body: dict[str, Any]) -> dict[str, Any]:
@@ -746,6 +890,8 @@ class WatchPartyPlugin(NekoPluginBase):
             ("POST", "/api/react"): self._panel_react,
             ("POST", "/api/config"): self._panel_config,
             ("POST", "/api/sessdata"): self._panel_save_sessdata,
+            ("POST", "/api/open_login"): self._panel_open_login,
+            ("POST", "/api/read_sessdata"): self._panel_read_sessdata,
             ("POST", "/api/comments"): self._panel_comments,
             ("POST", "/api/open_player"): self._panel_open_player,
             ("POST", "/api/close_player"): self._panel_close_player,
@@ -862,12 +1008,12 @@ class WatchPartyPlugin(NekoPluginBase):
             upcoming = [r for r in session["reactions"] if r["at"] not in fired_ids and r["at"] >= position - 5]
         screen_ctx = ""
         if self.screen_assist and self.screen_on_react:
-            shot = capture_screen_text()
-            if shot["ok"]:
-                screen_ctx = build_screen_context(shot["text"])
-                self.logger.info("[watch_party] 截屏辅助：{} 字", len(shot["text"]))
+            seen = await self._describe_screen(frame=self._grab_player_frame())
+            if seen.get("ok") and seen.get("text"):
+                screen_ctx = build_screen_context(seen["text"])
+                self.logger.info("[watch_party] 看画面({})：{} 字", seen.get("source"), len(seen["text"]))
             else:
-                self.logger.info("[watch_party] 截屏不可用: {}", shot["error"])
+                self.logger.info("[watch_party] 看画面不可用: {}", seen.get("error"))
         subs = session.get("subtitles") or []
         near_subs = subtitle_window(subs, position) if subs else []
         if screen_ctx:

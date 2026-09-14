@@ -44,11 +44,17 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
     <div class="bar"><div id="bar" style="width:0%"></div></div>
     <div style="margin:12px 0;padding-top:10px;border-top:1px solid #322b4a">
       <div>字幕模式（B站登录凭证）：<span id="sd" class="toggle">…</span></div>
-      <input type="password" id="sessdata" placeholder="粘贴 SESSDATA（本地存储，不上传）" style="width:calc(100% - 130px);margin:8px 0;background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:8px 12px;font-size:13px">
+      <div style="margin:8px 0">
+        <button onclick="openLogin()">🅱 登录 B 站</button>
+        <button onclick="readSessdata()">📥 读取登录态</button>
+        <span class="sub">推荐用法：点「登录 B 站」在弹出的窗口里扫码登录一次，登录态长期保存；再点「读取登录态」自动拿到字幕权限喵～</span>
+      </div>
+      <input type="password" id="sessdata" placeholder="或手工粘贴 SESSDATA（本地存储，不上传）" style="width:calc(100% - 130px);margin:8px 0;background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:8px 12px;font-size:13px">
       <button onclick="saveSess()">保存凭证</button>
       <button class="danger" onclick="clearSess()">清除</button>
-      <div class="sub">获取方法：浏览器登录B站 → F12 → 应用/Application → Cookie → bilibili.com → 复制 SESSDATA 的值。有效期数月，失效了重新复制一次即可。</div>
+      <div class="sub">手工获取：浏览器登录B站 → F12 → 应用/Application → Cookie → bilibili.com → 复制 SESSDATA 的值。有效期数月，失效了重新复制一次即可。</div>
     </div>
+    <div class="sub" style="margin:8px 0">👁 看片模式：<span id="vm" class="toggle">…</span>（多模态视觉模型看画面，失败自动降级本地 OCR；可配 vision_model 换任意厂商）</div>
     <div class="sub" style="margin:8px 0">🔄 自动对齐：<span id="al" class="toggle">…</span>　每 3 分钟心跳时截屏读播放器进度条，偏差 ≥30 秒自动校准</div>
     <div style="margin:10px 0">反应密度：<input type="number" id="rpm" value="3" min="1" max="10" step="1"> 条/分钟
       <button onclick="saveRpm()">保存密度</button>（下次预习生效，1~10）</div>
@@ -108,7 +114,7 @@ async function loadStatus(){
     const kv=document.getElementById("kv");
     if(!d.prepared){kv.innerHTML="<tr><td>当前没有陪看会话喵。对猫娘发B站链接即可开始～</td></tr>";document.getElementById("bar").style.width="0%";return}
     const pct=Math.min(100,Math.round(d.position/d.duration*100));
-    kv.innerHTML=`<tr><td>状态</td><td>${d.watching?"▶️ 陪看中":"⏸️ 已预习未开始"}</td></tr>
+    kv.innerHTML=`<tr><td>状态</td><td>${d.watching?"▶️ 陪看中":"⏸️ 已预习未开始"}${d.player_alive?" · 📺 同步窗口已开":""}</td></tr>
       <tr><td>视频</td><td>${d.title}（${d.bvid}）</td></tr>
       <tr><td>进度</td><td>${fmt(d.position)} / ${fmt(d.duration)}</td></tr>
       <tr><td>反应点</td><td>${d.fired} / ${d.total} 已触发${d.screen_assist?" · 📷 截屏辅助开":""}</td></tr>`;
@@ -116,8 +122,13 @@ async function loadStatus(){
     if(d.reactions_per_minute) document.getElementById("rpm").value=d.reactions_per_minute;
     const sd=document.getElementById("sd");
     const al=document.getElementById("al");
+    const vm=document.getElementById("vm");
     al.textContent=(d.screen_assist&&d.auto_align!==false)?"开（随截屏心跳）":"需开截屏辅助";
     al.className="toggle "+(d.screen_assist?"on":"off");
+    if(vm){
+      vm.textContent=d.screen_vision?("👁 视觉模型（"+(d.vision_model||"宿主通道")+"）→ OCR 兜底"):"本地 OCR";
+      vm.className="toggle "+(d.screen_assist?"on":"off");
+    }
     sd.textContent=d.sessdata_set?"已启用（字幕模式）":"未设置（弹幕模式）";
     sd.className="toggle "+(d.sessdata_set?"on":"off");
     document.getElementById("status").textContent="已更新喵～";
@@ -129,6 +140,23 @@ async function openPlayer(){
   try{
     const d=await api("/api/open_player",{method:"POST",body:"{}"});
     res.textContent=d.ok?("✅ "+d.message):("❌ "+d.error);
+  }catch(e){res.textContent="失败："+e}
+}
+async function openLogin(){
+  const res=document.getElementById("result");
+  res.textContent="打开B站登录窗口喵…在弹出的浏览器里扫码登录，登录完回面板点「读取登录态」即可。";
+  try{
+    const d=await api("/api/open_login",{method:"POST",body:"{}"});
+    res.textContent=d.ok?("✅ "+d.message):("❌ "+d.error);
+  }catch(e){res.textContent="失败："+e}
+}
+async function readSessdata(){
+  const res=document.getElementById("result");
+  res.textContent="读取登录态喵…";
+  try{
+    const d=await api("/api/read_sessdata",{method:"POST",body:"{}"});
+    res.textContent=d.ok?("✅ "+(d.message||"已读取登录态")):("❌ "+d.error);
+    await loadStatus();
   }catch(e){res.textContent="失败："+e}
 }
 async function saveRpm(){
