@@ -7,6 +7,8 @@ shot_interval_idle = 120
 auto_detect = true
 # 预学习（可选辅助）：开才抓弹幕/字幕/热评存本地素材，用来理解画面里的梗；不开也能陪看
 prelearn = false
+# 思考模式作用范围：none=都保留思考；chat=只关"出话"的思考；vision=只关"看画面"的思考；all=两条都关（最快，默认）
+thinking_mode = "all"
 request_timeout = 15
 llm_timeout = 45
 poll_interval = 2

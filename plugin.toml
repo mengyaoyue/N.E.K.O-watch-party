@@ -1,9 +1,9 @@
 [plugin]
 name = "陪看猫娘"
-description = "陪主人看B站视频喵：说「陪我看」或猫娘截屏探测到主人在看视频，就打开陪看开关，按可自定义的节奏高频自主截屏，看到笑点/名场面/梗就主动吐槽接梗，看不到就安静等着——全程没有任何播放进度，不报时间、不猜进度。预学习（抓弹幕/字幕/热评存本地）是可选的辅助素材，不跑也能陪看。新增：面板自定义截屏频率与开关；自带窗口登录B站（持久化会话）解锁字幕；视觉模型看画面失败自动降级本地 OCR。"
+description = "陪主人看B站视频喵：说「陪我看」或猫娘截屏探测到主人在看视频，就打开陪看开关，按可自定义的节奏高频自主截屏，看到笑点/名场面/梗就主动吐槽接梗，看不到就安静等着——全程没有任何播放进度，不报时间、不猜进度。预学习（抓弹幕/字幕/热评存本地）是可选的辅助素材，不跑也能陪看。新增：面板自定义截屏频率与开关；自带窗口登录B站（持久化会话）解锁字幕；视觉模型看画面失败自动降级本地 OCR；「思考模式」开关可关掉模型先思考再回答，明显缩短从截屏到出话的延迟。"
 short_description = "Catgirl watches Bilibili with you: a single switch + custom screenshot cadence drives autonomous screen-watching comments. No playback progress at all. Optional pre-learning."
-keywords = ["陪看", "watch", "bilibili", "B站", "弹幕", "danmaku", "共情", "猫娘", "neko", "视频", "video", "字幕", "subtitle", "视觉", "vision", "截屏", "screenshot"]
-version = "0.6.0"
+keywords = ["陪看", "watch", "bilibili", "B站", "弹幕", "danmaku", "共情", "猫娘", "neko", "视频", "video", "字幕", "subtitle", "视觉", "vision", "截屏", "screenshot", "思考", "thinking", "延迟"]
+version = "0.7.0"
 type = "plugin"
 id = "neko_watch_party"
 entry = "plugin.plugins.neko_watch_party:WatchPartyPlugin"
@@ -41,6 +41,9 @@ bili_sessdata = ""
 screen_assist = true
 # 看片用多模态视觉模型（true=视觉模型描述画面；失败自动降级本地 OCR）
 screen_vision = true
+# 思考模式作用范围：none=都保留思考；chat=只关"出话"的思考；vision=只关"看画面"的思考；all=两条都关（最快，默认）
+# 关掉思考会省略模型"先想一大段再回答"的时间，能明显缩短从截屏到说出评论的延迟
+thinking_mode = "all"
 # 视觉模型超时（秒）
 vision_timeout = 25
 # 视觉模型覆盖：四项留空则用宿主设置里的 vision / 对话模型通道；填了就用插件自己的

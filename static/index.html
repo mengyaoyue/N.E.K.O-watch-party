@@ -15,6 +15,7 @@ button:hover{background:#7d6ef0}
 button.danger{background:#a33b52}
 button.on{background:#2f9e63}
 input[type=number]{background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:6px 10px;font-size:14px;width:96px}
+select{background:#2a2440;color:#e8e4f2;border:1px solid #3a3352;border-radius:8px;padding:6px 10px;font-size:14px}
 #status{color:#9a93b5;font-size:13px;margin-left:8px}
 .kv td:first-child{color:#9a93b5;width:130px}
 td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
@@ -61,6 +62,20 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
       <label class="sw"><input type="checkbox" id="t_vision" onchange="saveToggles()">视觉模型看画面（失败自动降级本地 OCR）</label>
       <div class="hint" style="margin-top:4px">预学习与截屏节奏都是「可选」的：不预学习也能陪看，猫娘纯靠画面理解；</div>
     </div>
+
+    <div class="row" style="margin-top:14px;padding-top:12px;border-top:1px solid #322b4a">
+      <div>🧠 思考模式（模型默认会「先想一大段再回答」，这段思考很吃时间）</div>
+      <div class="row">
+        <select id="th_mode" onchange="saveThinking()">
+          <option value="all">都关掉思考 —— 出话最快（推荐）</option>
+          <option value="chat">只关「说话」的思考</option>
+          <option value="vision">只关「看画面」的思考</option>
+          <option value="none">都保留思考 —— 最慢，但想得细</option>
+        </select>
+        <span class="hint">关的是模型内部的思考过程，猫娘照样看画面照样吐槽，只是省掉"先推理一遍"的时间。</span>
+      </div>
+      <div class="hint">觉得延迟还是大，就选「都关掉」；觉得吐槽变浅了，就选回「都保留」。</div>
+    </div>
     <div id="result" class="sub" style="margin-top:10px;white-space:pre-wrap"></div>
     <span id="status"></span>
   </div>
@@ -104,7 +119,8 @@ td{padding:6px;border-bottom:1px solid #322b4a;font-size:14px}
       2. 开关打开后，猫娘按「在看视频时」的频率高频自主截屏，看到笑点/名场面/梗就主动吐槽接梗，看不到画面就安静等着；<br>
       3. 开着「自动探测」时，猫娘会按待机频率低频截屏，一旦发现你在看视频就自己把开关打开；<br>
       4. 想手动让猫娘看一眼现在这画面，点「现在就聊这画面」；<br>
-      5. 结束：点「结束陪看」，或对猫娘说「结束陪看」。
+      5. 结束：点「结束陪看」，或对猫娘说「结束陪看」；<br>
+      6. 嫌出话慢：把「思考模式」选成「都关掉思考」，猫娘就不再先在心里推理一大段了。
     </div>
   </div>
 </div>
@@ -170,11 +186,15 @@ async function loadStatus(){
     document.getElementById("t_pre").checked=!!d.prelearn;
     document.getElementById("t_assist").checked=!!d.screen_assist;
     document.getElementById("t_vision").checked=!!d.screen_vision;
+    const thSel=document.getElementById("th_mode");
+    if(document.activeElement!==thSel)thSel.value=d.thinking_mode||"all";
 
+    const thLabels={all:"都关掉（最快）",chat:"只关出话思考",vision:"只关看画面思考",none:"都保留（最慢）"};
     const kv=document.getElementById("kv");
     kv.innerHTML=`<tr><td>陪看开关</td><td>${d.watching?"▶️ 已打开":"⏸️ 关闭"}${d.player_alive?" · 📺 同步窗口已开":""}</td></tr>
       <tr><td>视频</td><td>${d.prepared?`${d.title}（${d.bvid}）`:"未预学习（纯靠截屏）"}</td></tr>
       <tr><td>截屏节奏</td><td>在看每 ${d.shot_interval_active}s · 待机每 ${d.shot_interval_idle}s</td></tr>
+      <tr><td>思考模式</td><td>${thLabels[d.thinking_mode]||d.thinking_mode||"都关掉（最快）"}</td></tr>
       <tr><td>已自主吐槽</td><td>${d.said||0} 句</td></tr>`;
 
     const sd=document.getElementById("sd");
@@ -204,6 +224,13 @@ async function saveToggles(){
   try{
     await api("/api/config",{method:"POST",body:JSON.stringify(body)});
     await loadStatus();flash("开关已保存喵～");
+  }catch(e){alert(e)}
+}
+async function saveThinking(){
+  const mode=document.getElementById("th_mode").value;
+  try{
+    await api("/api/config",{method:"POST",body:JSON.stringify({thinking_mode:mode})});
+    await loadStatus();flash("思考模式已保存喵～");
   }catch(e){alert(e)}
 }
 async function openPlayer(){

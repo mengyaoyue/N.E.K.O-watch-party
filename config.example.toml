@@ -19,6 +19,8 @@ bili_sessdata = ""
 screen_assist = true
 # 看片用多模态视觉模型（true=视觉模型描述画面；失败自动降级本地 OCR）
 screen_vision = true
+# 思考模式作用范围：none=都保留思考；chat=只关"出话"的思考；vision=只关"看画面"的思考；all=两条都关（最快，默认）
+thinking_mode = "all"
 # 视觉模型超时（秒）
 vision_timeout = 25
 # ↓ 视觉模型覆盖：四项留空则用宿主设置里的 vision / 对话模型通道；填了就用插件自己的

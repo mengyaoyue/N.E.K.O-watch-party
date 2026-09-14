@@ -313,8 +313,14 @@ async def describe_frame(
     quality: int = _JPEG_QUALITY,
     timeout: float = 25.0,
     max_tokens: int = 1024,
+    disable_thinking: bool = False,
 ) -> tuple[bool, str]:
-    """把一帧交给视觉模型描述。返回 (成功, 描述或错误信息)。"""
+    """把一帧交给视觉模型描述。返回 (成功, 描述或错误信息)。
+
+    disable_thinking=True 时额外带 `extra_body={"thinking":{"type":"disabled"}}`（跳过先思考再回答）。
+    宿主视觉接口不一定接受这个参数，所以是"防御式"的：带参数的调用一旦失败，会自动换回原样再试一次，
+    绝不会因为提速反而看不了画面。
+    """
     ok, data_url = frame_to_data_url(frame, max_side, quality)
     if not ok:
         return False, data_url
@@ -325,47 +331,59 @@ async def describe_frame(
         from utils.llm_client import create_chat_llm_async
     except Exception as exc:
         return False, f"视觉接口不可用：{exc}"
-    try:
-        llm = await create_chat_llm_async(
-            model=cfg["model"],
-            base_url=cfg["base_url"],
-            api_key=cfg.get("api_key") or "",
-            max_completion_tokens=int(max_tokens),
-            timeout=float(timeout),
-            provider_type=cfg.get("provider_type"),
-        )
-    except Exception as exc:
-        return False, f"视觉模型初始化失败：{exc}"
-    try:
-        response = await asyncio.wait_for(
-            llm.ainvoke(
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": data_url}},
-                            {"type": "text", "text": (prompt or VISION_PROMPT)[:800]},
-                        ],
-                    }
-                ]
-            ),
-            timeout=float(timeout),
-        )
-        text = _content_to_text(response)
-        if not text:
-            return False, "视觉模型返回空内容"
-        return True, text
-    except asyncio.TimeoutError:
-        return False, "视觉模型超时"
-    except Exception as exc:
-        return False, f"视觉模型调用失败：{exc}"
-    finally:
-        aclose = getattr(llm, "aclose", None)
-        if callable(aclose):
-            try:
-                await aclose()
-            except Exception:
-                pass
+
+    base_kwargs = {
+        "model": cfg["model"],
+        "base_url": cfg["base_url"],
+        "api_key": cfg.get("api_key") or "",
+        "max_completion_tokens": int(max_tokens),
+        "timeout": float(timeout),
+        "provider_type": cfg.get("provider_type"),
+    }
+
+    async def _attempt(extra: dict[str, Any]) -> tuple[bool, str, bool]:
+        """单次尝试：返回 (是否成功, 文本或错误, 失败时是否值得换参数重试)。"""
+        try:
+            llm = await create_chat_llm_async(**base_kwargs, **extra)
+        except Exception as exc:
+            return False, f"视觉模型初始化失败：{exc}", True
+        try:
+            response = await asyncio.wait_for(
+                llm.ainvoke(
+                    [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                                {"type": "text", "text": (prompt or VISION_PROMPT)[:800]},
+                            ],
+                        }
+                    ]
+                ),
+                timeout=float(timeout),
+            )
+            text = _content_to_text(response)
+            if not text:
+                return False, "视觉模型返回空内容", False
+            return True, text, False
+        except asyncio.TimeoutError:
+            return False, "视觉模型超时", False
+        except Exception as exc:
+            return False, f"视觉模型调用失败：{exc}", True
+        finally:
+            aclose = getattr(llm, "aclose", None)
+            if callable(aclose):
+                try:
+                    await aclose()
+                except Exception:
+                    pass
+
+    if disable_thinking:
+        ok2, text, retryable = await _attempt({"extra_body": {"thinking": {"type": "disabled"}}})
+        if ok2 or not retryable:
+            return ok2, text
+    ok2, text, _ = await _attempt({})
+    return ok2, text
 
 
 async def describe_screen(
@@ -375,13 +393,15 @@ async def describe_screen(
     max_side: int = _MAX_SIDE,
     quality: int = _JPEG_QUALITY,
     timeout: float = 25.0,
+    disable_thinking: bool = False,
 ) -> dict[str, Any]:
     """抓主屏一帧 → 视觉模型描述。返回 {"ok","text","error","source"}。"""
     ok, frame = await asyncio.to_thread(capture_frame)
     if not ok:
         return {"ok": False, "text": "", "error": str(frame), "source": "screen"}
     ok2, text = await describe_frame(
-        frame, prompt=prompt, override=override, max_side=max_side, quality=quality, timeout=timeout
+        frame, prompt=prompt, override=override, max_side=max_side, quality=quality, timeout=timeout,
+        disable_thinking=disable_thinking,
     )
     return {
         "ok": bool(ok2),

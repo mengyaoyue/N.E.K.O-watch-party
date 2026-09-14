@@ -63,7 +63,7 @@ from ._watch_logic import (
 )
 
 _PLUGIN_ID = "neko_watch_party"
-_VERSION = "0.6.0"
+_VERSION = "0.7.0"
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -122,6 +122,16 @@ def _clamp_float(value: Any, low: float, high: float, default: float) -> float:
     return max(low, min(high, num))
 
 
+# 思考模式作用范围：none=都保留思考；chat=只关对话思考；vision=只关视觉思考；all=两条都关（最快）
+_THINKING_MODES = ("none", "chat", "vision", "all")
+
+
+def _safe_thinking_mode(value: Any, default: str = "all") -> str:
+    """把配置值收敛到合法思考模式；非法值回退 default。"""
+    text = _safe_str(value).lower()
+    return text if text in _THINKING_MODES else default
+
+
 def _http_get(url: str, cookie: str = "", timeout: float = 15.0) -> tuple[int, bytes]:
     """标准库 GET：返回 (状态码, 响应字节)；网络错误返回 (0, b"")。"""
     headers = {"User-Agent": _USER_AGENT, "Referer": "https://www.bilibili.com/"}
@@ -149,8 +159,12 @@ def _http_get_json(url: str, cookie: str = "", timeout: float = 15.0) -> Optiona
     return data if isinstance(data, dict) else None
 
 
-async def _call_llm(system: str, user: str, timeout: float) -> str:
-    """调用 N.E.K.O 配置的对话模型（与 neko_natural_command 同一套取数方式）。"""
+async def _call_llm(system: str, user: str, timeout: float, disable_thinking: bool = False) -> str:
+    """调用 N.E.K.O 配置的对话模型（与 neko_natural_command 同一套取数方式）。
+
+    disable_thinking=True 时在请求体顶层加 `thinking:{type:disabled}`（DeepSeek 官方字段），
+    跳过"先思考一大段再回答"，能明显降低出话延迟。
+    """
     from utils.config_manager import get_config_manager
 
     cfg = get_config_manager().get_model_api_config("conversation")
@@ -170,27 +184,36 @@ async def _call_llm(system: str, user: str, timeout: float) -> str:
     }
     if "chat/completions" not in base_url:
         base_url = base_url + "/chat/completions"
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        base_url,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
 
-    def _post() -> tuple[int, str]:
+    def _make_request(data: dict[str, Any]) -> urllib.request.Request:
+        return urllib.request.Request(
+            base_url,
+            data=json.dumps(data).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+
+    def _post(req: urllib.request.Request) -> tuple[int, str]:
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             return exc.code, ""
         except Exception:
             return 0, ""
 
-    status, text = await asyncio.to_thread(_post)
+    if disable_thinking:
+        fast_request = _make_request(dict(payload, thinking={"type": "disabled"}))
+        status, text = await asyncio.to_thread(_post, fast_request)
+        if status != 200:
+            # 不是所有模型都认 thinking 字段：退回原始请求重试，避免"提速"反而发不出话
+            status, text = await asyncio.to_thread(_post, _make_request(payload))
+    else:
+        status, text = await asyncio.to_thread(_post, _make_request(payload))
     if status != 200:
         raise SdkError(f"模型接口返回 {status}，预习失败了喵。")
     try:
@@ -222,6 +245,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self.prelearn: bool = False
         self.shot_interval_active: float = 20.0
         self.shot_interval_idle: float = 120.0
+        # 思考模式作用范围：none=都保留；chat=只关对话；vision=只关视觉；all=都关（出话最快）
+        self.thinking_mode: str = "all"
         self.bili_sessdata: str = ""
         self.vision_timeout: float = 25.0
         self.vision_model: str = ""
@@ -280,6 +305,8 @@ class WatchPartyPlugin(NekoPluginBase):
         self.prelearn = _safe_bool(section.get("prelearn"), False)
         # 视觉看片：优先用多模态模型描述画面，失败再降级本地 OCR
         self.screen_vision = _safe_bool(section.get("screen_vision"), True)
+        # 思考模式：关掉能省掉"先想一大段"的时间，明显降低出话延迟
+        self.thinking_mode = _safe_thinking_mode(section.get("thinking_mode"), "all")
         self.vision_timeout = max(5.0, float(_safe_int(section.get("vision_timeout"), 25)))
         self.vision_model = _safe_str(section.get("vision_model"))
         self.vision_base_url = _safe_str(section.get("vision_base_url")).rstrip("/")
@@ -344,6 +371,12 @@ class WatchPartyPlugin(NekoPluginBase):
             self.screen_assist = _safe_bool(saved.get("screen_assist"), self.screen_assist)
         if "screen_vision" in saved:
             self.screen_vision = _safe_bool(saved.get("screen_vision"), self.screen_vision)
+        if "thinking_mode" in saved:
+            self.thinking_mode = _safe_thinking_mode(saved.get("thinking_mode"), self.thinking_mode)
+
+    def _thinking_disabled(self, chain: str) -> bool:
+        """该链路要不要关掉思考：chain 取 "chat"（出话）或 "vision"（看画面）。"""
+        return self.thinking_mode == "all" or self.thinking_mode == chain
 
     @lifecycle(id="shutdown")
     def shutdown(self, **_):
@@ -643,6 +676,7 @@ class WatchPartyPlugin(NekoPluginBase):
                 _call_llm(
                     "你是陪看的猫娘，只对看到的画面做真实反应，看不到就别硬说，别报时间进度。",
                     prompt, self.llm_timeout,
+                    disable_thinking=self._thinking_disabled("chat"),
                 )
             )
         except SdkError as exc:
@@ -710,11 +744,13 @@ class WatchPartyPlugin(NekoPluginBase):
                     ok, text = await describe_frame(
                         frame, prompt=prompt, override=self._vision_override(),
                         timeout=self.vision_timeout,
+                        disable_thinking=self._thinking_disabled("vision"),
                     )
                 else:
                     res = await describe_screen(
                         prompt=prompt, override=self._vision_override(),
                         timeout=self.vision_timeout,
+                        disable_thinking=self._thinking_disabled("vision"),
                     )
                     ok = bool(res.get("ok"))
                     text = str(res.get("text") or res.get("error") or "")
@@ -796,6 +832,7 @@ class WatchPartyPlugin(NekoPluginBase):
             "prelearn": self.prelearn,
             "screen_assist": self.screen_assist,
             "screen_vision": self.screen_vision,
+            "thinking_mode": self.thinking_mode,
             "vision_model": self.vision_model or "宿主 vision 通道",
             "sessdata_set": bool(self.bili_sessdata),
             "player_alive": bool(self._pwindow is not None and self._pwindow.is_alive()),
@@ -834,6 +871,9 @@ class WatchPartyPlugin(NekoPluginBase):
                 value = _safe_bool(body.get(key), bool(getattr(self, key)))
                 setattr(self, key, value)
                 changed[key] = value
+        if "thinking_mode" in body:
+            self.thinking_mode = _safe_thinking_mode(body.get("thinking_mode"), self.thinking_mode)
+            changed["thinking_mode"] = self.thinking_mode
         if changed:
             state_path = Path(self.data_path()) / "panel_state.json"
             try:
@@ -1060,6 +1100,7 @@ class WatchPartyPlugin(NekoPluginBase):
             raw = await _call_llm(
                 "你是陪看的猫娘，只对看到的画面做真实反应，看不到就别硬说，别报时间进度。",
                 prompt, self.llm_timeout,
+                disable_thinking=self._thinking_disabled("chat"),
             )
         except SdkError:
             raise

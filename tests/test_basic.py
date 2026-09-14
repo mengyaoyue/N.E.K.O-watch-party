@@ -180,6 +180,12 @@ def main():
     # 8.3 截屏层不得再具备"从画面里抠播放进度"的能力（那正是幻觉根源）
     assert not hasattr(scr, "extract_playback_time"), "截屏层不得再解析播放进度"
 
+    # 8.4 视觉链路要支持透传"关思考"，且必须是防御式的（宿主接口不认就退回原样）
+    src_scr = (ROOT / "_screen.py").read_text(encoding="utf-8")
+    assert "disable_thinking" in src_scr, "视觉描述应支持透传关思考开关"
+    assert 'extra_body' in src_scr and '"type": "disabled"' in src_scr, "关思考应走 extra_body 的 thinking:{type:disabled}"
+    assert "async def _attempt" in src_scr, "视觉带参数调用失败后应能退回原样重试一次"
+
     # 9. 源码级断言：开关 + 截屏驱动；任何时间进度/对齐/跳转机制都应彻底移除
     src_init = (ROOT / "__init__.py").read_text(encoding="utf-8")
     assert "auto_detect" in src_init, "应有自动探测开关"
@@ -190,6 +196,16 @@ def main():
     assert "build_screen_reaction_prompt" in src_init and "parse_screen_reaction" in src_init, "应接看屏反应"
     assert "画面上是「" in src_init, "推送应以画面内容为主参考"
     assert "def _panel_config" in src_init, "面板应能自定义截屏频率"
+
+    # 9.1 思考模式：默认可关、分链路生效，且不认这个字段的模型会自动退回普通请求
+    assert "thinking_mode" in src_init, "应有可选的思考模式开关（关掉能明显降延迟）"
+    assert "_safe_thinking_mode" in src_init and "def _thinking_disabled" in src_init, "思考模式应有取值收敛与分链路判断"
+    for mode in ("none", "chat", "vision", "all"):
+        assert f'"{mode}"' in src_init, f"思考模式应含取值 {mode}"
+    assert '"type": "disabled"' in src_init and "thinking=" in src_init, "对话链路关思考应写 thinking:{type:disabled}"
+    assert src_init.count("disable_thinking=self._thinking_disabled") == 4, "出话两处 + 看画面两处都要带上思考开关"
+    src_html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert "thinking_mode" in src_html and "saveThinking" in src_html, "面板应能改思考模式"
     for dead in (
         "_current_position", "reactions_per_minute", "_auto_align", "_panel_jump",
         "api/jump", "jump_to", "extract_playback_time", "start_epoch",
