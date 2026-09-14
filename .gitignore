@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+data/
+.neko-plugin-packages/
+*.egg-info/
+.pytest_cache/
